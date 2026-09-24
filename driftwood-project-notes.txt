@@ -1,0 +1,263 @@
+================================================================
+DRIFTWOOD -- PROJECT NOTES
+================================================================
+Compiled: 24 September 2026
+
+
+----------------------------------------------------------------
+1. CORE CONCEPT
+----------------------------------------------------------------
+- DriftWood is a macOS application / AI harness / MCP server that
+  finds unused files, folders, and applications on a user's
+  machine.
+- Unlike a traditional rule-based file scanner, DriftWood uses an
+  AI model to actually reason about whether something is safe to
+  delete, instead of relying purely on static rules. This lets it
+  catch nuance a rule-based tool would miss.
+- DriftWood is strictly READ-ONLY. It never deletes, moves, or
+  modifies anything itself -- it only reports. The user decides
+  what to do with the information.
+- Originally conceived for general/non-technical users (people who
+  don't know what an MCP server is) as a storage-saving tool.
+
+
+----------------------------------------------------------------
+2. BUILD PLAN
+----------------------------------------------------------------
+- Build the standalone macOS app first, for personal use and
+  dogfooding.
+- Build an MCP server version afterward, once the core scan engine
+  is proven, so any MCP client (e.g. Claude) can drive it directly.
+- Architect the scan engine and the interface layer separately from
+  the start, so the app and the MCP server end up being two thin
+  wrappers around the same core engine, rather than two separate
+  builds.
+
+
+----------------------------------------------------------------
+3. WHAT A REPORT ENTRY CONTAINS
+----------------------------------------------------------------
+For every file, folder, or app DriftWood finds, it reports:
+  - The specific file/folder path
+  - A button that opens/reveals the file or folder
+  - Its risk level (see section 4)
+  - A summary: what it is, what it does, why it was likely created
+The user reviews the report and decides whether to delete anything
+themselves -- DriftWood never deletes anything.
+
+
+----------------------------------------------------------------
+4. RISK LEVELS
+----------------------------------------------------------------
+1. No risk at all
+   Example: a long-forgotten app's cache that regenerates unchanged
+   if the app is redownloaded.
+
+2. No risk, but maybe worth keeping
+   Example: .dmg installer files -- you never know if you'll want
+   them again.
+
+3. Slight/no risk, but a higher chance you'll want it back, or it's
+   annoying to redownload
+   Example: an AI app's skill files -- redownloadable, but the app
+   hasn't been opened in a long time.
+
+4. Personal / lost data / non-replaceable
+   Example: a 5-year-old Minecraft world. You might want it gone,
+   but deleting it is permanent.
+
+Proposed river-themed names for these tiers (liked in concept, not
+yet finalized):
+   1. "Driftwood"            -- dead wood, safe to clear
+   2. "Message in a Bottle"  -- technically disposable, worth a
+                                 look before tossing
+   3. "Salvage"               -- recoverable, but costly/annoying to
+                                 reacquire
+   4. "Anchor" / "Sunken Treasure" -- irreplaceable, don't touch
+
+
+----------------------------------------------------------------
+5. THE "STILL IN THE CURRENT" RULE
+----------------------------------------------------------------
+- If a file or app has been used within the last 3 weeks, it should
+  not be considered for deletion at all.
+- Exception: cases where deleting it does literally nothing because
+  it's automatically recreated -- though at that point there's
+  little reason to delete it anyway.
+- Floated internal name for this rule: "still in the current" (i.e.
+  it hasn't drifted free yet).
+
+
+----------------------------------------------------------------
+6. THEME AND UI
+----------------------------------------------------------------
+- The entire app is driftwood/river themed, matching a watercolor
+  river illustration (currently being mocked up in Canva).
+- Main scan button: "Search the river" instead of "Search files",
+  alongside an animated river visual.
+- Report display: designed to feel like flipping through the pages
+  of a notebook/journal rather than a flat list or table. Each
+  finding could be styled like a field note / beachcomber's log
+  entry to match the watercolor illustration style.
+- Explicitly decided AGAINST a "results wash ashore" animation for
+  the results list -- judged too hard to implement cleanly and
+  likely to look bad.
+
+Themed status labels (replacing typical LLM status messages):
+   - Waiting for LLM response      -> "Traveling to the river"
+   - Running file-search commands  -> "Searching for driftwood"
+   - Thinking/reasoning            -> "Daydreaming"
+   - (proposed) Scanning progress       -> "Following the current"
+   - (proposed) Fetching file metadata  -> "Wading in" / "Testing
+                                            the water"
+   - (proposed) Compiling final report  -> "Sorting the driftwood"
+   - (proposed) Error/failure           -> "Snagged" / "Lost in the
+                                            current"
+   - (proposed) No results found        -> "Clear waters"
+- A dropdown arrow next to a status label (e.g. "Daydreaming")
+  reveals the underlying detail -- e.g. the full LLM reasoning.
+
+
+----------------------------------------------------------------
+7. RIVER ANIMATION -- TECHNIQUE
+----------------------------------------------------------------
+Explored whether an LLM can generate a genuinely watercolor-looking
+animated river purely via SVG. Conclusion: procedural SVG can't
+really replicate hand-painted watercolor texture -- that's better
+done as a static illustrated asset (like the existing Canva
+artwork). Plan: keep the illustrated river as static art, and layer
+lightweight animated effects on top of it.
+
+Effects tested and KEPT:
+   - Turbulence-based ripple distortion (feTurbulence +
+     feDisplacementMap, animated) for a "living water" wobble
+   - Pulsing shimmer highlights (animated opacity on small light
+     shapes)
+   - Static paper-grain texture overlay (feTurbulence at low
+     opacity) for a watercolor-paper feel
+
+Effect tested and REJECTED:
+   - Small particles/"specks" drifting downstream along a motion
+     path -- felt off, dropped from the plan
+
+
+----------------------------------------------------------------
+8. TECHNICAL ARCHITECTURE -- TWO-STAGE SCANNING
+----------------------------------------------------------------
+You can't feasibly run every file on a disk through an LLM (cost,
+context limits, speed), so scanning is split into two stages:
+
+STAGE 1 -- Deterministic, local, free (no LLM involved)
+   - Walks the filesystem (on macOS, Spotlight metadata such as
+     kMDItemLastUsedDate is much faster than statting every file
+     individually)
+   - Applies hard rules first:
+       - Drop anything used within the last 3 weeks (the "still in
+         the current" rule)
+       - Flag known junk locations: caches, logs, orphaned
+         Application Support/Preferences folders belonging to apps
+         no longer installed (classic AppCleaner-style orphan
+         detection)
+       - Rank remaining candidates by size, since bigger items
+         matter more
+   - Output: a much smaller candidate list (dozens-to-hundreds of
+     items instead of thousands), each with structured metadata
+     (path, size, dates, orphan status, etc.)
+
+STAGE 2 -- LLM reasoning, cloud-based (only runs on Stage 1's
+candidates)
+   - Candidates are sent in batches (roughly 20-30 at a time, as
+     structured data) rather than one API call per file, to control
+     cost and context usage
+   - The LLM's job is narrower than "find unused files" -- Stage 1
+     already did that. Its job is to reason about risk level and
+     write the human-readable explanation for each candidate -- the
+     part a rule-based tool can't do.
+
+
+----------------------------------------------------------------
+9. AI PROVIDER / PRIVACY MODEL
+----------------------------------------------------------------
+- LLM reasoning happens in the cloud via OpenRouter, not via a
+  local model. Reasoning: most regular users can't self-host a
+  model, and models small enough to run on ~8GB RAM aren't good
+  enough at this kind of reasoning.
+- DriftWood will be fully open source under an MIT license, partly
+  for trust/transparency -- though open source alone isn't
+  considered sufficient for trust by itself.
+- DriftWood will use/prefer OpenRouter providers with a Zero Data
+  Retention (ZDR) policy -- providers that contractually do not
+  store prompts or responses at all, not even briefly for abuse
+  scanning.
+     - OpenRouter supports this directly: a "zdr": true parameter
+       can be set on API requests, and there's an account-level
+       "ZDR only" privacy setting that restricts routing to
+       ZDR-compliant providers only.
+     - Plan: enforce zdr:true (or equivalent) on every DriftWood
+       API call.
+- Users will be able to choose different "levels of invasiveness"
+  for how much data Stage 2 sends to the LLM. Proposed tiers:
+     - Minimal: only structural metadata (type, size, dates, orphan
+       status) -- no real paths or filenames
+     - Standard: full paths and filenames, but never file content
+     - Deep: for genuinely ambiguous cases, DriftWood can send a
+       folder's file listing (not file contents) to improve
+       judgment
+- Product idea, not yet decided how to implement: DriftWood
+  probably shouldn't auto-scan deeply personal folders (e.g.
+  Documents, Photos) by default -- likely require the user to
+  explicitly opt those folders in.
+
+
+----------------------------------------------------------------
+10. TRUST / FEEDBACK FEATURES
+----------------------------------------------------------------
+- Users can correct a risk assessment they disagree with (e.g.
+  "actually, always keep things like this"), and DriftWood should
+  remember that preference going forward. Considered a strong
+  differentiator versus other cleanup tools.
+- The report should show real reasoning behind each risk call (tied
+  to the "Daydreaming" dropdown revealing full LLM thinking), not
+  just a flat badge, so the AI's judgment doesn't feel like a black
+  box -- especially important for the higher risk tiers where a
+  wrong call is costly.
+
+
+----------------------------------------------------------------
+11. SCAN PROGRESS / MOTIVATIONAL UI
+----------------------------------------------------------------
+During a scan, show running counters for:
+   - Number of files searched
+   - Total size of files searched (e.g. "50GB searched" reads as
+     impressive)
+   - Potential space recoverable so far (sum of flagged candidates)
+     -- arguably the most motivating number, since it's what the
+     user actually cares about
+
+
+----------------------------------------------------------------
+12. SCOPE
+----------------------------------------------------------------
+- For now, DriftWood is a one-off, run-on-demand tool -- not a
+  recurring/scheduled background scanner.
+- A future "ongoing companion" mode (periodic check-ins,
+  notifications when driftwood piles up again) was discussed as a
+  possible later feature, not something to design around yet.
+
+
+----------------------------------------------------------------
+13. OPEN QUESTIONS / NOT YET RESOLVED
+----------------------------------------------------------------
+- macOS Full Disk Access permission: the app will need to request
+  this to scan broadly, which even technical users find alarming.
+  Needs a clear, on-theme explanation during onboarding --
+  especially important for a non-technical target audience, since
+  this is the first trust hurdle before any results are even shown.
+- Exact final names for the risk tiers and the remaining themed
+  status labels are still open.
+- How exactly the "opt-in" system for scanning personal folders
+  (Documents, Photos, etc.) would work in practice.
+
+================================================================
+END OF NOTES
+================================================================
