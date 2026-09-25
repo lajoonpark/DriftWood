@@ -1,7 +1,7 @@
 ================================================================
 DRIFTWOOD -- PROJECT NOTES
 ================================================================
-Compiled: 24 September 2026
+Compiled: 25 September 2026
 
 
 ----------------------------------------------------------------
@@ -66,14 +66,17 @@ themselves -- DriftWood never deletes anything.
    Example: a 5-year-old Minecraft world. You might want it gone,
    but deleting it is permanent.
 
-Proposed river-themed names for these tiers (liked in concept, not
-yet finalized):
+Proposed river-themed names for these tiers:
    1. "Driftwood"            -- dead wood, safe to clear
    2. "Message in a Bottle"  -- technically disposable, worth a
-                                 look before tossing
-   3. "Salvage"               -- recoverable, but costly/annoying to
-                                 reacquire
-   4. "Anchor" / "Sunken Treasure" -- irreplaceable, don't touch
+                                  look before tossing
+   3. "Current"               -- still in the flow, recoverable but
+                                  costly/annoying to reacquire
+   4. "Source"                -- the origin, irreplaceable, don't touch
+
+Previous candidates (archived): "Salvage" (sounded like "recover this"
+but meant "annoying to lose"), "Anchor / Sunken Treasure" ("Sunken
+Treasure" sounded valuable/keep, not irreplaceable/don't-delete).
 
 
 ----------------------------------------------------------------
@@ -109,13 +112,18 @@ Themed status labels (replacing typical LLM status messages):
    - Thinking/reasoning            -> "Daydreaming"
    - (proposed) Scanning progress       -> "Following the current"
    - (proposed) Fetching file metadata  -> "Wading in" / "Testing
-                                            the water"
+                                             the water"
    - (proposed) Compiling final report  -> "Sorting the driftwood"
    - (proposed) Error/failure           -> "Snagged" / "Lost in the
-                                            current"
+                                             current"
    - (proposed) No results found        -> "Clear waters"
 - A dropdown arrow next to a status label (e.g. "Daydreaming")
   reveals the underlying detail -- e.g. the full LLM reasoning.
+
+- Report grouping: results grouped by folder category (Caches,
+  Downloads, Application Support, Documents, Photos, etc.) with
+  per-group totals (item count, size) so users can mentally triage
+  high-trust vs. personal areas at a glance.
 
 
 ----------------------------------------------------------------
@@ -130,15 +138,15 @@ lightweight animated effects on top of it.
 
 Effects tested and KEPT:
    - Turbulence-based ripple distortion (feTurbulence +
-     feDisplacementMap, animated) for a "living water" wobble
+      feDisplacementMap, animated) for a "living water" wobble
    - Pulsing shimmer highlights (animated opacity on small light
-     shapes)
+      shapes)
    - Static paper-grain texture overlay (feTurbulence at low
-     opacity) for a watercolor-paper feel
+      opacity) for a watercolor-paper feel
 
 Effect tested and REJECTED:
    - Small particles/"specks" drifting downstream along a motion
-     path -- felt off, dropped from the plan
+      path -- felt off, dropped from the plan
 
 
 ----------------------------------------------------------------
@@ -158,21 +166,35 @@ STAGE 1 -- Deterministic, local, free (no LLM involved)
          Application Support/Preferences folders belonging to apps
          no longer installed (classic AppCleaner-style orphan
          detection)
-       - Rank remaining candidates by size, since bigger items
-         matter more
-   - Output: a much smaller candidate list (dozens-to-hundreds of
-     items instead of thousands), each with structured metadata
-     (path, size, dates, orphan status, etc.)
+   - Computes a deterministic "drift score" for each remaining
+     candidate using weighted heuristics:
+       - Size (bigger = higher score)
+       - Age (older = higher score)
+       - Cache-location boolean (in ~/Library/Caches, /tmp, etc. = higher)
+       - Orphan status (orphaned app support = higher)
+       - Folder depth (deeper = slightly higher, less likely active)
+       - File type histogram (cache-like extensions .cache, .tmp, .log = higher)
+       - Child count (many small files in folder = higher for folder-level)
+   - Output: a scored candidate list (dozens-to-hundreds of items),
+     each with structured metadata (path, size, dates, orphan status,
+     drift score, component heuristics).
 
 STAGE 2 -- LLM reasoning, cloud-based (only runs on Stage 1's
 candidates)
-   - Candidates are sent in batches (roughly 20-30 at a time, as
-     structured data) rather than one API call per file, to control
-     cost and context usage
-   - The LLM's job is narrower than "find unused files" -- Stage 1
-     already did that. Its job is to reason about risk level and
-     write the human-readable explanation for each candidate -- the
-     part a rule-based tool can't do.
+   - Candidates split into three bands by drift score:
+       - HIGH score (top ~15%): auto-labeled "Driftwood" (tier 1),
+         skip LLM entirely
+       - LOW score (bottom ~15%): auto-labeled "Source" (tier 4),
+         skip LLM entirely
+       - MIDDLE band (~70%): sent to LLM for reasoning
+   - Middle-band candidates batched by score proximity (similar
+     ambiguity level per batch), ~20-30 per batch, to control cost
+     and avoid context contamination from mixing obvious/ambiguous.
+   - The LLM's job: reason about risk level and write the
+     human-readable explanation for each candidate -- the part a
+     rule-based tool can't do.
+   - LLM receives structured data per candidate (path, size, dates,
+     orphan status, drift score components, file type summary).
 
 
 ----------------------------------------------------------------
@@ -203,10 +225,20 @@ candidates)
      - Deep: for genuinely ambiguous cases, DriftWood can send a
        folder's file listing (not file contents) to improve
        judgment
-- Product idea, not yet decided how to implement: DriftWood
-  probably shouldn't auto-scan deeply personal folders (e.g.
-  Documents, Photos) by default -- likely require the user to
-  explicitly opt those folders in.
+
+- Folder scanning scope / onboarding UX:
+   - On first launch, onboarding screen presents folder categories
+     with recommended presets:
+       - "Low personal risk" (ON by default): ~/Library/Caches,
+         /tmp, ~/Library/Logs, orphaned Application Support
+       - "Medium personal risk" (OFF by default): ~/Downloads,
+         ~/Library/Containers (sandboxed app data)
+       - "High personal risk" (OFF by default): ~/Documents,
+         ~/Pictures/Photos, ~/Movies, ~/Music
+   - Each category has a toggle; user can customize per-folder.
+   - Cache locations clearly labeled "on by default" with a single
+     button to disable all cache scanning if desired.
+   - Results always grouped by category in the report (see Section 6).
 
 
 ----------------------------------------------------------------
@@ -221,6 +253,34 @@ candidates)
   just a flat badge, so the AI's judgment doesn't feel like a black
   box -- especially important for the higher risk tiers where a
   wrong call is costly.
+
+- Preference learning implementation (local-first, hybrid):
+   - Memory folder (persistence layer):
+       ~/Library/Application Support/DriftWood/memory/
+         ├─ preferences.jsonl    # raw user corrections, one per line
+         ├─ rules.json           # distilled deterministic rules
+         └─ session-log.jsonl    # audit trail
+   - Local deterministic rule engine (zero LLM cost, guaranteed):
+       - When user overrides a tier, extract features (file extension,
+         parent folder name, size band, orphan status, drift score band)
+         → append to preferences.jsonl → background distill → update
+         rules.json (e.g., {"ext": ".dmg", "folder": "Downloads",
+         "tier": 2}) → rule engine hot-reloads.
+       - Rules apply instantly to all future candidates (Stage 1 +
+         Stage 2), before any LLM call.
+       - rules.json is plain JSON, user-editable, exportable, portable.
+   - Optional few-shot injection (privacy-tier gated):
+       - Only for middle-band candidates that DON'T match a local rule.
+       - Pull last N relevant corrections from preferences.jsonl
+         (feature-similarity), inject as few-shot examples in LLM prompt.
+       - Controlled by privacy tier: Minimal=never, Standard=opt-in,
+         Deep=opt-in with folder listing context.
+   - No fine-tuning, no cloud sync unless explicitly opted in.
+
+- MCP integration:
+   - Expose memory://rules and memory://preferences as read-only
+     MCP resources. MCP clients (Claude, etc.) decide whether to
+     inject them into their own context.
 
 
 ----------------------------------------------------------------
@@ -253,10 +313,21 @@ During a scan, show running counters for:
   Needs a clear, on-theme explanation during onboarding --
   especially important for a non-technical target audience, since
   this is the first trust hurdle before any results are even shown.
-- Exact final names for the risk tiers and the remaining themed
-  status labels are still open.
-- How exactly the "opt-in" system for scanning personal folders
-  (Documents, Photos, etc.) would work in practice.
+- Spotlight kMDItemLastUsedDate reliability: false negatives for
+  files opened via CLI, non-App-Store apps, QuickTime media, etc.
+  Mitigation: drift score incorporates age + cache-location + orphan
+  status as stronger signals; "still in the current" rule is a hard
+  filter only when Spotlight reports recent use, not a requirement
+  for candidacy.
+- Drift score weight tuning: 7 heuristics listed (size, age,
+  cache-location, orphan, depth, file-type, child-count) but
+  relative weights not set. Will tune during dogfooding.
+- Three-band thresholds: "~15% / ~70% / ~15%" — by count? by bytes?
+  by score distribution quantiles? Decide during dogfooding.
+- Deep privacy tier: "folder's file listing" — just names? names +
+  sizes + extensions? recursive depth? Token cost vs. judgment quality.
+- Stage 2 model selection: which OpenRouter model (Claude 3.5 Sonnet?
+  GPT-4o? cheaper alternative?) — cost/quality/latency tradeoff.
 
 ================================================================
 END OF NOTES
