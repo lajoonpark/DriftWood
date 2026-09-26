@@ -1,0 +1,17 @@
+[package]
+name = "driftwood-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless DriftWood scanner for dogfooding and score tuning (Phase 1–2 workhorse)."
+
+[[bin]]
+name = "driftwood"
+path = "src/main.rs"
+
+[dependencies]
+driftwood-core.workspace = true
+clap = { version = "4", features = ["derive"] }
+serde_json.workspace = true
+tokio.workspace = true
+chrono.workspace = true
