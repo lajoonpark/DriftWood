@@ -1,0 +1,147 @@
+/* Mirror of crates/driftwood-core/src/types.rs — the wire contract.
+   Field names must stay identical to the serialized Rust model. */
+
+export type Tier = 1 | 2 | 3 | 4;
+
+export type TierSource =
+  | "auto_high"
+  | "auto_low"
+  | "rule"
+  | "llm"
+  | "fallback"
+  | "never_flag";
+
+export type Kind = "file" | "folder" | "app";
+export type OrphanStatus = "orphaned" | "active" | "unknown";
+export type ScopeCategory = "low" | "medium" | "high";
+export type PrivacyTier = "minimal" | "standard" | "deep";
+export type Band = "high" | "middle" | "low";
+
+/** Core scan phases, mapped to themed labels in the UI. */
+export type Phase =
+  | "enumerating"
+  | "wading"
+  | "filtering"
+  | "scoring"
+  | "reasoning"
+  | "assembling";
+
+export const TIER_NAMES: Record<Tier, string> = {
+  1: "Driftwood",
+  2: "Message in a Bottle",
+  3: "Current",
+  4: "Source",
+};
+
+export const TIER_BLURBS: Record<Tier, string> = {
+  1: "No risk at all — dead wood, safe to clear.",
+  2: "Disposable, but worth a look before tossing.",
+  3: "Recoverable, but reacquiring it would cost you.",
+  4: "Personal or irreplaceable — don't touch.",
+};
+
+export const PHASE_LABELS: Record<Phase, string> = {
+  enumerating: "Searching for driftwood",
+  wading: "Wading in",
+  filtering: "Following the current",
+  scoring: "Scoring",
+  reasoning: "Traveling to the river",
+  assembling: "Sorting the driftwood",
+};
+
+export const SCOPE_LABELS: Record<ScopeCategory, string> = {
+  low: "Low personal risk",
+  medium: "Medium personal risk",
+  high: "High personal risk",
+};
+
+export const SCOPE_HINTS: Record<ScopeCategory, string> = {
+  low: "Caches, logs, temp files — regenerates itself if cleared.",
+  medium: "Downloads and sandboxed app containers. Mostly replaceable.",
+  high: "Documents, photos, music. Only drift here on purpose.",
+};
+
+export const PRIVACY_LABELS: Record<PrivacyTier, string> = {
+  minimal: "Minimal",
+  standard: "Standard",
+  deep: "Deep",
+};
+
+export interface KindStats {
+  children: number;
+  files: number;
+  cache_like_ratio: number;
+  truncated: boolean;
+}
+
+export interface ScoreComponents {
+  size: number;
+  age: number;
+  cache_loc: number;
+  orphan: number;
+  depth: number;
+  file_type: number;
+  child_count: number;
+}
+
+export interface Candidate {
+  id: string;
+  path: string;
+  kind: Kind;
+  size_bytes: number;
+  kind_stats?: KindStats;
+  last_used_date?: string;
+  last_used_from_spotlight: boolean;
+  modified_date?: string;
+  created_date?: string;
+  orphan_status: OrphanStatus;
+  scope_category: ScopeCategory;
+  score: number;
+  score_components: ScoreComponents;
+  band: Band;
+}
+
+export interface ReportEntry {
+  candidate: Candidate;
+  tier: Tier;
+  tier_source: TierSource;
+  summary: string;
+  reasoning: string;
+  confidence: number;
+  llm_model?: string;
+  privacy_tier_used: PrivacyTier;
+  rule_id?: string;
+}
+
+export interface ReportGroup {
+  category: ScopeCategory;
+  count: number;
+  bytes: number;
+}
+
+export interface Report {
+  groups: ReportGroup[];
+  entries: ReportEntry[];
+  /** Non-fatal notices carried with the report (e.g. murky Spotlight data). */
+  warnings?: string[];
+  /** Set when the cost cap cut Stage 2 short ("Snagged — ran out of river"). */
+  cost_cap?: boolean;
+}
+
+export interface ScanConfig {
+  scopes: ScopeCategory[];
+  privacy_tier: PrivacyTier;
+  stage2: boolean;
+  model?: string;
+  cost_cap_usd?: number;
+}
+
+export type ScanEvent =
+  | { type: "phase"; phase: Phase }
+  | { type: "files_searched"; total: number }
+  | { type: "bytes_searched"; total: number }
+  | { type: "candidates_found"; total: number }
+  | { type: "recoverable_bytes"; total: number }
+  | { type: "notice"; message: string }
+  | { type: "warn"; message: string }
+  | { type: "error"; message: string };

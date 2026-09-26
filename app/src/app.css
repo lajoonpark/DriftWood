@@ -1,0 +1,283 @@
+/* ============================================================
+   DriftWood — design system
+   Warm watercolor paper, ink slate, river blues. Quiet, roomy.
+   ============================================================ */
+
+:root {
+  /* paper */
+  --paper: #f3edde;
+  --paper-raised: #f7f2e6;
+  --paper-deep: #ece4d0;
+
+  /* ink */
+  --ink: #29323c;
+  --ink-soft: #4c5a66;
+  --ink-faint: rgba(41, 50, 60, 0.42);
+  --hairline: rgba(41, 50, 60, 0.14);
+  --hairline-soft: rgba(41, 50, 60, 0.08);
+
+  /* river */
+  --river-deep: #2c4d97;
+  --river: #3f66a8;
+  --river-mid: #7fa3cd;
+  --river-pale: #d9e5f1;
+
+  /* tier accents (from the stamps) */
+  --t1: #4e7c82; /* driftwood — sea-glass teal  */
+  --t2: #c0803c; /* bottle — warm amber          */
+  --t3: #46639c; /* current — indigo             */
+  --t4: #37586b; /* source — deep slate blue     */
+
+  --good: #4e7d5b;
+  --warn: #a8552f;
+
+  /* type */
+  --font-display: "Fraunces Variable", Georgia, serif;
+  --font-ui: "Karla Variable", Karla, -apple-system, sans-serif;
+
+  --disp-variation: "opsz" 72, "SOFT" 55, "WONK" 1;
+
+  /* motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-soft: cubic-bezier(0.33, 0.9, 0.25, 1);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: 15.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  background-color: var(--paper);
+  background-image: url("/assets/paper-texture.png");
+  background-size: 640px;
+  background-position: center;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+
+/* faint vignette so the paper never feels flat */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    120% 90% at 50% 40%,
+    transparent 55%,
+    rgba(41, 50, 60, 0.05) 100%
+  );
+  z-index: 3;
+}
+
+::selection {
+  background: rgba(63, 102, 168, 0.22);
+}
+
+/* ---------- typography ---------- */
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 360;
+  font-variation-settings: var(--disp-variation);
+  color: var(--ink);
+  letter-spacing: -0.015em;
+  line-height: 1.08;
+}
+
+.kicker {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.serif-lead {
+  font-family: var(--font-display);
+  font-variation-settings: "opsz" 30, "SOFT" 50, "WONK" 0;
+  font-weight: 420;
+  font-style: italic;
+  color: var(--ink-soft);
+}
+
+.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.92em;
+  letter-spacing: -0.01em;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* ---------- buttons ---------- */
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--river);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 30px;
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition:
+    transform 0.35s var(--ease-out),
+    box-shadow 0.35s var(--ease-out),
+    background-color 0.35s,
+    color 0.35s,
+    opacity 0.3s;
+  will-change: transform;
+}
+
+.btn-primary {
+  color: #f5f1e6;
+  background:
+    radial-gradient(120% 180% at 20% 0%, rgba(255, 255, 255, 0.22), transparent 45%),
+    linear-gradient(160deg, #4873b4 0%, var(--river-deep) 100%);
+  box-shadow:
+    0 1px 2px rgba(30, 45, 80, 0.25),
+    0 10px 28px -10px rgba(44, 77, 151, 0.55);
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow:
+    0 2px 4px rgba(30, 45, 80, 0.22),
+    0 18px 40px -12px rgba(44, 77, 151, 0.6);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0) scale(0.985);
+  transition-duration: 0.12s;
+}
+
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn-ghost {
+  color: var(--ink-soft);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.btn-ghost:hover {
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px rgba(41, 50, 60, 0.32);
+  transform: translateY(-1px);
+}
+
+.btn-quiet {
+  color: var(--ink-faint);
+  font-size: 13.5px;
+  padding: 6px 4px;
+  border-bottom: 1px solid transparent;
+  transition: color 0.25s, border-color 0.25s;
+}
+
+.btn-quiet:hover {
+  color: var(--ink);
+  border-color: rgba(41, 50, 60, 0.3);
+}
+
+/* ---------- surfaces ---------- */
+
+.card {
+  background: var(--paper-raised);
+  border: 1px solid var(--hairline-soft);
+  border-radius: 20px;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.7) inset,
+    0 14px 34px -22px rgba(41, 50, 60, 0.35);
+}
+
+.hairline {
+  border: none;
+  border-top: 1px solid var(--hairline);
+}
+
+/* ---------- reveal-on-enter primitives ----------
+   Every block of text/content enters through .rv; JS adds .is-in.
+   Delay is staggered with --rv-delay. */
+
+.rv {
+  opacity: 0;
+  transform: translateY(16px);
+  filter: blur(7px);
+  transition:
+    opacity 0.9s var(--ease-out),
+    transform 0.9s var(--ease-out),
+    filter 0.9s var(--ease-out);
+  transition-delay: var(--rv-delay, 0ms);
+}
+
+.rv.is-in {
+  opacity: 1;
+  transform: none;
+  filter: blur(0);
+}
+
+/* ---------- scrollbars ---------- */
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(41, 50, 60, 0.16);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(41, 50, 60, 0.3);
+}
+
+/* ---------- reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .rv {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}

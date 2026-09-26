@@ -1,2 +1,13 @@
 target/
 .cargo/
+
+# Asset folders
+assets-production/
+assets-agent-preview/
+app/shots/
+mockups/
+
+# Build outputs
+app/dist/
+app/public/assets/
+app/node_modules/
