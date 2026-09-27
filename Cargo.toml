@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "app/src-tauri",
     "crates/driftwood-core",
     "crates/driftwood-cli",
     "crates/driftwood-mcp",

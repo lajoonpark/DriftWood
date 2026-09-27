@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
-  import { cubicIn, cubicOut } from "svelte/easing";
+  import { cubicOut } from "svelte/easing";
   import type { TransitionConfig } from "svelte/transition";
   import Stamp from "./components/Stamp.svelte";
   import Welcome from "./screens/Welcome.svelte";
@@ -36,17 +36,23 @@
 
   /* ---------- page transitions ---------- */
 
+  /* Deliberately blur-free and out-transition-free. Two reasons:
+     1. A full-viewport blur painted over the river's SVG-displaced layers
+        stalls WKWebView's compositor for seconds (the "buttons feel dead
+        after a snag" report) and the isolated blend group flashes the
+        asset's raw paper white.
+     2. Svelte drives `out:` removal from a requestAnimationFrame loop —
+        when the webview suspends (occluded window, nap), the outgoing page
+        never unmounts and the incoming one stays at opacity 0: every
+        button looks dead. Entrance-only transitions self-heal: the swap is
+        instant and the animation simply completes when rendering resumes.
+        The per-element .rv reveals still carry the blur language. */
+
   const pageIn = (_node: Element, { delay = 0 } = {}): TransitionConfig => ({
     delay,
     duration: 640,
     easing: cubicOut,
-    css: (t, u) => `opacity:${t}; transform: translateY(${28 * u}px); filter: blur(${9 * u}px)`,
-  });
-
-  const pageOut = (_node: Element): TransitionConfig => ({
-    duration: 240,
-    easing: cubicIn,
-    css: (t, u) => `opacity:${t}; transform: translateY(${-8 * u}px); filter: blur(${5 * u}px)`,
+    css: (t, u) => `opacity:${t}; transform: translateY(${28 * u}px)`,
   });
 
   const ONBOARDING_STEPS: View[] = ["welcome", "scopes", "trust", "privacy"];
@@ -93,7 +99,7 @@
 
   <main>
     {#key view}
-      <div class="page" in:pageIn={{}} out:pageOut>
+      <div class="page" in:pageIn={{}}>
         {#if view === "welcome"}
           <Welcome onNext={() => go("scopes")} />
         {:else if view === "scopes"}
@@ -219,6 +225,16 @@
   .page {
     position: absolute;
     inset: 0;
+    /* The river art melts into the page via mix-blend-mode: multiply, and any
+       transform/filter (including page transitions) isolates that blend group.
+       Carrying the paper — same color and grain as body, fixed so the grain
+       lines up at the header seam — keeps the backdrop paper-colored while the
+       river slides in, instead of flashing the asset's raw white paper. */
+    background-color: var(--paper);
+    background-image: url("/assets/paper-texture.png");
+    background-size: 640px;
+    background-position: center;
+    background-attachment: fixed;
   }
 
   .toasts {

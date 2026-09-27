@@ -5,7 +5,7 @@
   import Counter from "../components/Counter.svelte";
   import { bridge } from "../lib/bridge";
   import { formatBytes, formatCount } from "../lib/format";
-  import { onboarding, scan, toast, SCOPE_FOLDERS } from "../lib/stores";
+  import { onboarding, scan, toast, SCOPE_FOLDERS, appSettings } from "../lib/stores";
   import { PRIVACY_LABELS, type Report, type ScanConfig } from "../lib/types";
 
   let { onDone }: { onDone: () => void } = $props();
@@ -19,7 +19,13 @@
     const scopes = (["low", "medium", "high"] as const).filter((cat) =>
       SCOPE_FOLDERS[cat].some((f) => s.folders[f.path]),
     );
-    return { scopes, privacy_tier: s.privacy, stage2: true };
+    return {
+      scopes,
+      privacy_tier: s.privacy,
+      stage2: true,
+      model: $appSettings.model,
+      cost_cap_usd: $appSettings.costCap,
+    };
   });
 
   const scopeSummary = $derived(
@@ -106,7 +112,7 @@
         <p class="kicker rv" in:fade={{ duration: 600, delay: 150 }}>Ready when you are</p>
         <h1 in:fly={{ y: 22, duration: 700, delay: 280 }}>Search the river?</h1>
         <p class="scope-line" in:fade={{ duration: 600, delay: 560 }}>
-          {scopeSummary} · cap $0.50
+          {scopeSummary} · cap ${$appSettings.costCap.toFixed(2)}
         </p>
         <div class="actions" in:fly={{ y: 14, duration: 600, delay: 780 }}>
           <button class="btn btn-primary cta" onclick={start}>Search the river</button>

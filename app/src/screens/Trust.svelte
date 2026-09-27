@@ -9,8 +9,18 @@
 
   async function check() {
     status = "checking";
-    const result = await bridge.checkFullDiskAccess();
-    status = result;
+    try {
+      status = await withTimeout(bridge.checkFullDiskAccess(), 10_000);
+    } catch {
+      status = "unknown";
+    }
+  }
+
+  function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+    return Promise.race([
+      p,
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+    ]);
   }
 
   const granted = $derived(status === "granted");
@@ -51,6 +61,15 @@
     <div class="check rv" use:reveal style="--rv-delay:820ms">
       {#if status === null}
         <button class="btn btn-ghost" onclick={check}>Check for access</button>
+        <div class="upfront">
+          <p class="steps">
+            Rather grant it first? System Settings → Privacy &amp; Security →
+            Full Disk Access → add DriftWood.
+          </p>
+          <button class="btn-quiet" onclick={() => bridge.openSystemSettings()}>
+            Open System Settings
+          </button>
+        </div>
       {:else if status === "checking"}
         <div class="pending" in:fade>
           <span class="ripple"></span>
@@ -150,7 +169,19 @@
     margin: 44px 0 8px;
     min-height: 64px;
     display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .upfront {
+    display: flex;
     align-items: center;
+    gap: 18px;
+  }
+
+  .upfront .steps {
+    margin-top: 0;
   }
 
   .pending {

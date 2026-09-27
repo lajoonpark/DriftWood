@@ -1,24 +1,173 @@
 <script lang="ts">
+  import Waters from "../components/Waters.svelte";
   import { reveal } from "../lib/motion";
-  import { onboarding, resetEverything, saveOnboarding } from "../lib/stores";
+  import {
+    onboarding,
+    saveOnboarding,
+    appSettings,
+    saveSettings,
+    resetEverything,
+  } from "../lib/stores";
   import { PRIVACY_LABELS, type PrivacyTier } from "../lib/types";
 
   let { onBack }: { onBack: () => void } = $props();
 
   let s = $state(structuredClone($onboarding));
+  let tune = $state(structuredClone($appSettings));
 
-  /* Settings beyond onboarding are UI-local until the shell persists them. */
-  let model = $state("anthropic/claude-haiku-class");
-  let costCap = $state(0.5);
+  function saveTune() {
+    saveSettings(tune);
+  }
 
-  const MODELS = [
-    { id: "anthropic/claude-haiku-class", label: "Claude Haiku-class — quick and cheap" },
-    { id: "openai/gpt-4o-mini-class", label: "GPT-4o-mini-class — quick and cheap" },
-    {
-      id: "anthropic/claude-sonnet-class",
-      label: "Claude Sonnet-class — more careful, more cost",
-    },
+  /* ---------- OpenRouter catalog ---------- */
+
+  interface ORModel {
+    id: string;
+    name: string;
+    context_length?: number;
+    pricing?: { prompt?: string; completion?: string };
+    architecture?: { output_modalities?: string[] };
+  }
+
+  const CATALOG_CACHE_KEY = "driftwood.catalog.v1";
+  const CATALOG_TTL = 24 * 60 * 60 * 1000;
+
+  /* Offline fallback so the picker is never empty. */
+  const FALLBACK_MODELS: ORModel[] = [
+    { id: "anthropic/claude-haiku-4.5", name: "Anthropic: Claude Haiku 4.5", context_length: 200000, pricing: { prompt: "0.000001", completion: "0.000005" } },
+    { id: "openai/gpt-4o-mini", name: "OpenAI: GPT-4o-mini", context_length: 128000, pricing: { prompt: "0.00000015", completion: "0.0000006" } },
+    { id: "openai/gpt-5-mini", name: "OpenAI: GPT-5 Mini", context_length: 400000, pricing: { prompt: "0.00000025", completion: "0.000002" } },
+    { id: "meta-llama/llama-3.3-70b-instruct", name: "Meta: Llama 3.3 70B Instruct", context_length: 131072, pricing: { prompt: "0.0000001", completion: "0.00000032" } },
   ];
+
+  let catalogList = $state<ORModel[]>([]);
+  let catalogState = $state<"loading" | "ok" | "failed">("loading");
+
+  function isTextModel(m: ORModel): boolean {
+    const outs = m.architecture?.output_modalities;
+    return !outs || outs.includes("text");
+  }
+
+  function readCache(): { list: ORModel[] } | null {
+    try {
+      const raw = localStorage.getItem(CATALOG_CACHE_KEY);
+      if (!raw) return null;
+      const cached = JSON.parse(raw) as { at: number; list: ORModel[] };
+      if (Date.now() - cached.at > CATALOG_TTL || !Array.isArray(cached.list)) return null;
+      return cached;
+    } catch {
+      return null;
+    }
+  }
+
+  async function loadCatalog(force = false) {
+    if (!force) {
+      const cached = readCache();
+      if (cached) {
+        catalogList = cached.list.filter(isTextModel);
+        catalogState = "ok";
+        return;
+      }
+    }
+    catalogState = "loading";
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/models");
+      if (!res.ok) throw new Error(String(res.status));
+      const j = (await res.json()) as { data: ORModel[] };
+      catalogList = j.data.filter(isTextModel);
+      catalogState = "ok";
+      try {
+        localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify({ at: Date.now(), list: j.data }));
+      } catch {
+        /* storage full — cache is optional */
+      }
+    } catch {
+      catalogList = FALLBACK_MODELS;
+      catalogState = "failed";
+    }
+  }
+
+  loadCatalog();
+
+  let query = $state("");
+
+  const results = $derived.by(() => {
+    if (catalogState === "loading") return [];
+    const q = query.trim().toLowerCase();
+    const pool = catalogList;
+    if (!q) return [];
+    const terms = q.split(/\s+/);
+    const scored = pool
+      .map((m) => {
+        const hay = `${m.id} ${m.name}`.toLowerCase();
+        const idx = terms.reduce((acc, t) => Math.max(acc, hay.indexOf(t)), 0);
+        return { m, hit: terms.every((t) => hay.includes(t)), idx };
+      })
+      .filter((r) => r.hit);
+    scored.sort((a, b) => a.idx - b.idx || a.m.id.localeCompare(b.m.id));
+    return scored.slice(0, 60).map((r) => r.m);
+  });
+
+  const selected = $derived(
+    catalogList.find((m) => m.id === tune.model) ??
+      FALLBACK_MODELS.find((m) => m.id === tune.model) ??
+      null,
+  );
+
+  function fmtPrice(perToken?: string): string | null {
+    const n = parseFloat(perToken ?? "");
+    if (!isFinite(n) || n < 0) return null; // "-1" = dynamic pricing
+    const perM = n * 1_000_000;
+    return perM === 0 ? "free" : `$${perM < 1 ? perM.toFixed(2) : perM.toFixed(perM < 10 ? 2 : 0)}`;
+  }
+
+  function ctxLabel(n?: number): string {
+    if (!n) return "";
+    return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`;
+  }
+
+  function pick(m: ORModel) {
+    tune.model = m.id;
+    saveTune();
+    query = "";
+  }
+
+  /* ---------- OpenRouter key ---------- */
+
+  let keyStatus = $state<"idle" | "checking" | "ok" | "bad" | "offline">("idle");
+  let keyCredits = $state<string | null>(null);
+
+  async function verifyKey() {
+    if (!tune.apiKey.trim()) {
+      keyStatus = "idle";
+      return;
+    }
+    keyStatus = "checking";
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/key", {
+        headers: { Authorization: `Bearer ${tune.apiKey.trim()}` },
+      });
+      if (res.ok) {
+        keyStatus = "ok";
+        try {
+          const j = (await res.json()) as { data?: { limit?: number | null; usage?: number } };
+          if (j.data && typeof j.data.limit === "number") {
+            keyCredits = `$${Math.max(0, j.data.limit - (j.data.usage ?? 0)).toFixed(2)} of credit left`;
+          } else {
+            keyCredits = "unlimited credit";
+          }
+        } catch {
+          keyCredits = null;
+        }
+      } else {
+        keyStatus = "bad";
+        keyCredits = null;
+      }
+    } catch {
+      keyStatus = "offline";
+      keyCredits = null;
+    }
+  }
 
   /* Shown as read-only context until the memory screens land (Phase 7). */
   const RULES = [
@@ -29,6 +178,10 @@
 
   function setPrivacy(p: PrivacyTier) {
     s.privacy = p;
+    saveOnboarding(s);
+  }
+
+  function saveWaters() {
     saveOnboarding(s);
   }
 </script>
@@ -60,17 +213,103 @@
       </p>
     </section>
 
-    <section class="card block rv" use:reveal style="--rv-delay:420ms">
-      <h2>The reasoning model</h2>
-      <select bind:value={model}>
-        {#each MODELS as m (m.id)}
-          <option value={m.id}>{m.label}</option>
-        {/each}
-      </select>
-      <p class="hint">Cheap-and-fast is the right default; the river is patient.</p>
+    <section class="waters-block rv" use:reveal style="--rv-delay:400ms">
+      <div class="waters-head">
+        <h2>Where the river may look</h2>
+        <p class="hint">The banks DriftWood may walk — same choice you made at first setup.</p>
+      </div>
+      <Waters folders={s.folders} onchange={saveWaters} staggerBase={480} />
     </section>
 
-    <section class="card block rv" use:reveal style="--rv-delay:540ms">
+    <section class="card block rv" use:reveal style="--rv-delay:520ms">
+      <h2>The reasoning model</h2>
+
+      <label class="field-label kicker" for="dw-apikey">OpenRouter API key</label>
+      <div class="key-line">
+        <input
+          id="dw-apikey"
+          type="password"
+          placeholder="sk-or-…"
+          autocomplete="off"
+          spellcheck="false"
+          bind:value={tune.apiKey}
+          onblur={saveTune}
+          oninput={() => (keyStatus = "idle")}
+        />
+        <button class="btn-ghost btn key-btn" onclick={verifyKey} disabled={keyStatus === "checking" || !tune.apiKey.trim()}>
+          {keyStatus === "checking" ? "Asking…" : "Test key"}
+        </button>
+      </div>
+      <p class="hint">
+        {#if keyStatus === "ok"}
+          <span class="ok-dot"></span>Key works{keyCredits ? ` — ${keyCredits}` : ""}.
+        {:else if keyStatus === "bad"}
+          OpenRouter rejected that key. Check it at openrouter.ai/keys.
+        {:else if keyStatus === "offline"}
+          Couldn't reach openrouter.ai — check your connection.
+        {:else}
+          Your key stays on this Mac.
+          <a class="quiet-link" href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">Get one here</a>.
+        {/if}
+      </p>
+
+      <label class="field-label kicker" for="dw-modelq">Model</label>
+      <div class="current-model">
+        <span class="m-name">{selected?.name ?? tune.model}</span>
+        {#if selected}
+          <span class="m-meta num">
+            {ctxLabel(selected.context_length)} ctx
+            {#if fmtPrice(selected.pricing?.prompt)}
+              · {fmtPrice(selected.pricing?.prompt)} in / {fmtPrice(selected.pricing?.completion)} out per 1M
+            {:else}
+              · dynamic pricing
+            {/if}
+          </span>
+        {/if}
+      </div>
+
+      <input
+        id="dw-modelq"
+        type="search"
+        class="model-search"
+        placeholder="Search all OpenRouter text models…"
+        bind:value={query}
+      />
+
+      {#if catalogState === "loading"}
+        <p class="hint">Fetching the catalog…</p>
+      {:else if catalogState === "failed"}
+        <p class="hint">
+          Couldn't reach openrouter.ai — showing known defaults.
+          <button class="btn-quiet" onclick={() => loadCatalog(true)}>Try again</button>
+        </p>
+      {/if}
+
+      {#if results.length}
+        <ul class="models">
+          {#each results as m (m.id)}
+            <li>
+              <button class="m-row" class:sel={m.id === tune.model} onclick={() => pick(m)}>
+                <span class="m-name">{m.name}</span>
+                <span class="m-meta num">
+                  {ctxLabel(m.context_length)} ctx
+                  {#if fmtPrice(m.pricing?.prompt)}
+                    · {fmtPrice(m.pricing?.prompt)} / {fmtPrice(m.pricing?.completion)} per 1M
+                  {:else}
+                    · dynamic
+                  {/if}
+                </span>
+                <span class="m-id mono">{m.id}</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {:else if query.trim() && catalogState === "ok"}
+        <p class="hint">Nothing in the catalog matches “{query}”.</p>
+      {/if}
+    </section>
+
+    <section class="card block rv" use:reveal style="--rv-delay:640ms">
       <h2>Cost cap</h2>
       <div class="cap-row">
         <input
@@ -78,16 +317,17 @@
           min="0.1"
           max="2"
           step="0.05"
-          bind:value={costCap}
+          bind:value={tune.costCap}
+          oninput={saveTune}
         />
-        <span class="cap num">${costCap.toFixed(2)}</span>
+        <span class="cap num">${tune.costCap.toFixed(2)}</span>
       </div>
       <p class="hint">
         Hard ceiling per scan. Past it, heuristics finish the job — honestly labeled.
       </p>
     </section>
 
-    <section class="card block rv" use:reveal style="--rv-delay:660ms">
+    <section class="card block rv" use:reveal style="--rv-delay:760ms">
       <h2>What the river remembers</h2>
       <p class="hint">
         Your corrections distill into local rules — plain JSON, editable, portable.
@@ -107,7 +347,7 @@
       </div>
     </section>
 
-    <footer class="rv" use:reveal style="--rv-delay:780ms">
+    <footer class="rv" use:reveal style="--rv-delay:880ms">
       <button class="btn btn-ghost" onclick={onBack}>Back</button>
     </footer>
   </div>
@@ -120,7 +360,7 @@
   }
 
   .inner {
-    max-width: 640px;
+    max-width: 720px;
     margin: 0 auto;
     padding: 9vh 32px 10vh;
   }
@@ -145,6 +385,19 @@
     font-size: 13px;
     color: var(--ink-faint);
     margin-top: 10px;
+  }
+
+  .waters-block {
+    margin-bottom: 18px;
+  }
+
+  .waters-head {
+    padding: 0 4px;
+    margin-bottom: 16px;
+  }
+
+  .waters-head h2 {
+    margin-bottom: 4px;
   }
 
   .seg {
@@ -178,7 +431,9 @@
     box-shadow: 0 4px 12px -4px rgba(44, 77, 151, 0.55);
   }
 
-  select {
+  input[type="password"],
+  input[type="search"],
+  .model-search {
     font: inherit;
     font-size: 14px;
     color: var(--ink);
@@ -186,8 +441,129 @@
     border-radius: 12px;
     border: 1px solid var(--hairline);
     background: rgba(255, 255, 255, 0.4);
-    max-width: 380px;
     width: 100%;
+  }
+
+  input:focus-visible {
+    outline: 2px solid var(--river);
+    outline-offset: 1px;
+  }
+
+  .field-label {
+    display: block;
+    margin: 18px 0 8px;
+  }
+
+  .block h2 + .field-label {
+    margin-top: 0;
+  }
+
+  .key-line {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .key-line input {
+    flex: 1;
+  }
+
+  .key-btn {
+    flex: none;
+    padding: 10px 18px;
+    font-size: 13.5px;
+  }
+
+  .key-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .ok-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--good);
+    margin-right: 4px;
+    vertical-align: baseline;
+  }
+
+  .quiet-link {
+    color: var(--river-deep);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .current-model {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    border: 1px solid var(--hairline-soft);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  .m-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .m-meta {
+    font-size: 12.5px;
+    color: var(--ink-faint);
+  }
+
+  .models {
+    list-style: none;
+    margin: 10px 0 0;
+    padding: 0;
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--hairline-soft);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  .models li + li {
+    border-top: 1px solid var(--hairline-soft);
+  }
+
+  .m-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "name meta"
+      "id meta";
+    align-items: baseline;
+    column-gap: 14px;
+    width: 100%;
+    text-align: left;
+    padding: 9px 14px;
+    transition: background-color 0.2s;
+  }
+
+  .m-row:hover {
+    background: rgba(127, 163, 205, 0.12);
+  }
+
+  .m-row.sel {
+    background: rgba(63, 102, 168, 0.14);
+    box-shadow: inset 2px 0 0 var(--river);
+  }
+
+  .m-row .m-id {
+    grid-area: id;
+    font-size: 11.5px;
+    color: var(--ink-faint);
+  }
+
+  .m-row .m-meta {
+    grid-area: meta;
+    white-space: nowrap;
   }
 
   .cap-row {

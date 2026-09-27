@@ -11,4 +11,7 @@ mockups/
 app/dist/
 app/public/assets/
 app/node_modules/
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
 kilo.jsonc
+.kilocodeignore

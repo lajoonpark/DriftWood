@@ -48,9 +48,54 @@ export const SCOPE_FOLDERS: Record<ScopeCategory, { path: string; hint: string }
 };
 
 export const DEFAULT_SETTINGS = {
-  model: "anthropic/claude-haiku-class",
+  model: "anthropic/claude-haiku-4.5",
   costCap: 0.5,
 };
+
+/* ---------- persisted tuning (model, cost cap, OpenRouter key) ---------- */
+
+const SETTINGS_KEY = "driftwood.settings.v1";
+
+export interface AppSettings {
+  /** OpenRouter model id, e.g. "anthropic/claude-haiku-class". */
+  model: string;
+  /** Hard ceiling per scan, USD. */
+  costCap: number;
+  /** OpenRouter API key (sk-or-…). Stays on this machine. */
+  apiKey: string;
+}
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) return { ...DEFAULT_SETTINGS, apiKey: "", ...(JSON.parse(raw) as Partial<AppSettings>) };
+  } catch {
+    /* fresh start */
+  }
+  return { ...DEFAULT_SETTINGS, apiKey: "" };
+}
+
+export const appSettings = writable<AppSettings>(loadSettings());
+
+export function saveSettings(s: AppSettings) {
+  const p = plain(s);
+  appSettings.set(p);
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(p));
+  } catch {
+    /* private mode */
+  }
+}
+
+export function resetEverything() {
+  try {
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem(SETTINGS_KEY);
+  } catch {
+    /* ignore */
+  }
+  location.reload();
+}
 
 function loadOnboarding(): OnboardingState {
   try {
@@ -74,10 +119,18 @@ function loadOnboarding(): OnboardingState {
 
 export const onboarding = writable<OnboardingState>(loadOnboarding());
 
+/** Screens pass $state proxies around; never let one into the store —
+ *  a proxy stored here makes the next `structuredClone($onboarding)`
+ *  (Settings, Scopes) throw DataCloneError and the navigation dies. */
+function plain<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v)) as T;
+}
+
 export function saveOnboarding(s: OnboardingState) {
-  onboarding.set(s);
+  const p = plain(s);
+  onboarding.set(p);
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify(s));
+    localStorage.setItem(LS_KEY, JSON.stringify(p));
   } catch {
     /* private mode */
   }
@@ -86,15 +139,6 @@ export function saveOnboarding(s: OnboardingState) {
 export function markOnboarded() {
   const s = get(onboarding);
   saveOnboarding({ ...s, done: true });
-}
-
-export function resetEverything() {
-  try {
-    localStorage.removeItem(LS_KEY);
-  } catch {
-    /* ignore */
-  }
-  location.reload();
 }
 
 /* ---------- runtime scan state ---------- */
