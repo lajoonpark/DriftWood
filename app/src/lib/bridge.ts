@@ -49,17 +49,12 @@ class TauriBridge implements Bridge {
     void tauriInvoke("open_system_settings");
   }
   async startScan(cfg: ScanConfig, onEvent: (e: ScanEvent) => void): Promise<Report> {
-    const unlisten = await tauriInvoke<() => void>("__listen_scan_events__", {}).catch(
-      () => null,
-    );
-    // The shell wires `scan-event` windows to the core event feed.
     const { listen } = await import("./tauri-events");
     const off = await listen<ScanEvent>("scan-event", onEvent);
     try {
       return await tauriInvoke<Report>("start_scan", { config: cfg });
     } finally {
       off?.();
-      unlisten?.();
     }
   }
   cancelScan(): void {

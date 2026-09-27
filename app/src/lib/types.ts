@@ -133,6 +133,8 @@ export interface ScanConfig {
   privacy_tier: PrivacyTier;
   stage2: boolean;
   model?: string;
+  /** OpenRouter API key from app settings; stays local. */
+  api_key?: string;
   cost_cap_usd?: number;
 }
 

@@ -24,6 +24,7 @@
       privacy_tier: s.privacy,
       stage2: true,
       model: $appSettings.model,
+      api_key: $appSettings.apiKey.trim() || undefined,
       cost_cap_usd: $appSettings.costCap,
     };
   });
