@@ -177,6 +177,7 @@ impl DriftWoodServer {
             stage2: !dry_run,
             model: driftwood_core::default_model().to_string(),
             api_key: std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.is_empty()),
+            allow_non_zdr: false,
             rules: driftwood_core::load_rules(None).unwrap_or_default(),
             tuning: driftwood_core::DriftTuning::default(),
             persist: true,

@@ -136,6 +136,9 @@ export interface ScanConfig {
   /** OpenRouter API key from app settings; stays local. */
   api_key?: string;
   cost_cap_usd?: number;
+  /** Danger zone: when true, Stage-2 calls are not restricted to
+   *  zero-data-retention providers (needed for most free models). */
+  allow_non_zdr?: boolean;
 }
 
 export type ScanEvent =

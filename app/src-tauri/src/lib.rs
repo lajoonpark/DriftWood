@@ -45,6 +45,32 @@ fn reveal_path(path: String) {
     let _ = std::process::Command::new("open").arg("-R").arg(&path).status();
 }
 
+/// Reveal many paths in Finder (`open -R` with all of them). Paths are
+/// grouped by parent directory so Finder opens one window per folder with
+/// every child preselected — the user then selects all and Cmd+Deletes.
+/// DriftWood itself never deletes (trust model).
+#[tauri::command]
+fn reveal_paths(paths: Vec<String>) {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for p in &paths {
+        if let Some(parent) = std::path::Path::new(p).parent() {
+            groups
+                .entry(parent.to_path_buf())
+                .or_default()
+                .push(p.clone());
+        }
+    }
+    for (_, group) in groups {
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg("-R");
+        for p in group {
+            cmd.arg(p);
+        }
+        let _ = cmd.status();
+    }
+}
+
 /// Scan options as sent by the frontend. Anything the shell does not send
 /// (rules, walk caps, weights) keeps the core defaults.
 #[derive(Debug, Deserialize)]
@@ -55,6 +81,9 @@ struct ScanConfigDto {
     model: Option<String>,
     api_key: Option<String>,
     cost_cap_usd: Option<f64>,
+    /// Danger zone: when true, Stage-2 calls are not restricted to
+    /// zero-data-retention providers. Opt-in only; default stays protected.
+    allow_non_zdr: Option<bool>,
 }
 
 /// Handle of the currently running scan, so `cancel_scan` can reach it.
@@ -110,6 +139,7 @@ async fn start_scan(
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| driftwood_core::default_model().to_string()),
         api_key,
+        allow_non_zdr: config.allow_non_zdr.unwrap_or(false),
         rules: load_rules(None).unwrap_or_default(),
         tuning,
         persist: true,
@@ -241,6 +271,7 @@ pub fn run() {
             check_full_disk_access,
             open_system_settings,
             reveal_path,
+            reveal_paths,
             start_scan,
             cancel_scan,
             last_report,

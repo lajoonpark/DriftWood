@@ -4,7 +4,8 @@
   import Stamp from "../components/Stamp.svelte";
   import { reveal } from "../lib/motion";
   import { formatBytes, formatCount } from "../lib/format";
-  import { scan } from "../lib/stores";
+  import { scan, toast } from "../lib/stores";
+  import { bridge } from "../lib/bridge";
   import {
     SCOPE_LABELS,
     TIER_NAMES,
@@ -20,31 +21,54 @@
   /* Effective tiers: overrides win over the report's assignment. */
   let overrides = $state<Record<string, Tier>>({});
   let reportId = $state<string | null>(null);
+  /* Tier filter: clicking a stamp in the header shows only that tier;
+     clicking it again clears the filter. */
+  let tierFilter = $state<Tier | null>(null);
 
   $effect(() => {
     if (report.entries[0]?.candidate.id !== reportId) {
       reportId = report.entries[0]?.candidate.id ?? null;
       overrides = {};
+      tierFilter = null;
     }
   });
 
   const effTier = (id: string, base: Tier): Tier => overrides[id] ?? base;
 
-  const groups = $derived(
-    [...report.groups]
-      .filter((g) => g.count > 0)
-      .sort((a, b) => (a.category === "low" ? -1 : b.category === "low" ? 1 : 0)),
+  function toggleTierFilter(t: Tier) {
+    tierFilter = tierFilter === t ? null : t;
+  }
+
+  const visibleEntries = $derived(
+    tierFilter === null
+      ? report.entries
+      : report.entries.filter((e) => effTier(e.candidate.id, e.tier) === tierFilter),
   );
 
-  const entriesByCategory = $derived.by(() => {
+  /* Groups rebuilt from the visible entries so counts and bytes reflect
+     the active tier filter. */
+  const groups = $derived.by(() => {
     const map = new Map<ScopeCategory, typeof report.entries>();
-    for (const cat of ["low", "medium", "high"] as ScopeCategory[]) {
-      const items = report.entries
-        .filter((e) => e.candidate.scope_category === cat)
-        .sort((a, b) => b.candidate.score - a.candidate.score);
-      if (items.length) map.set(cat, items);
+    for (const e of visibleEntries) {
+      let list = map.get(e.candidate.scope_category);
+      if (!list) map.set(e.candidate.scope_category, (list = []));
+      list.push(e);
     }
-    return map;
+    return (
+      ["low", "medium", "high"] as ScopeCategory[]
+    )
+      .filter((cat) => map.has(cat))
+      .map((cat) => {
+        const items = map
+          .get(cat)!
+          .sort((a, b) => b.candidate.score - a.candidate.score);
+        return {
+          category: cat,
+          count: items.length,
+          bytes: items.reduce((n, e) => n + e.candidate.size_bytes, 0),
+          entries: items,
+        };
+      });
   });
 
   const totalBytes = $derived(report.groups.reduce((n, g) => n + g.bytes, 0));
@@ -57,6 +81,21 @@
 
   function onOverride(id: string, tier: Tier) {
     overrides = { ...overrides, [id]: tier };
+  }
+
+  /* Bulk triage: every entry the report currently stamps Driftwood
+     (tier 1), honoring user overrides. Revealing preselects them in
+     Finder so the user deletes — DriftWood never does. */
+  const driftwoodPaths = $derived(
+    report.entries
+      .filter((e) => effTier(e.candidate.id, e.tier) === 1)
+      .map((e) => e.candidate.path),
+  );
+
+  function revealAllDriftwood() {
+    if (driftwoodPaths.length === 0) return;
+    bridge.revealAll(driftwoodPaths);
+    toast(`Revealed ${formatCount(driftwoodPaths.length)} items in Finder.`);
   }
 
   function rescan() {
@@ -79,8 +118,14 @@
         <div class="stamps">
           {#each [1, 2, 3, 4] as t (t)}
             <div class="stat">
-              <Stamp tier={t as Tier} size={34} title={TIER_NAMES[t as Tier]} />
-              <span class="count num">{tierCounts[t as Tier]}</span>
+              <Stamp
+                tier={t as Tier}
+                size={34}
+                title={`Show only ${TIER_NAMES[t as Tier]} items`}
+                active={tierFilter === t}
+                onclick={() => toggleTierFilter(t as Tier)}
+              />
+              <span class="count num" class:on={tierFilter === t}>{tierCounts[t as Tier]}</span>
             </div>
           {/each}
         </div>
@@ -98,6 +143,13 @@
           {/each}
         </div>
       {/if}
+
+      {#if tierFilter !== null}
+        <p class="filter-note">
+          Showing only <strong>{TIER_NAMES[tierFilter]}</strong> — click the stamp again to let
+          everything back through.
+        </p>
+      {/if}
     </header>
 
     <div class="pages">
@@ -110,7 +162,7 @@
               <span class="num">{formatBytes(g.bytes)}</span>
             </span>
           </div>
-          {#each entriesByCategory.get(g.category) ?? [] as e, i (e.candidate.id)}
+          {#each g.entries as e, i (e.candidate.id)}
             <div use:reveal style={`--rv-delay:${Math.min(i * 60, 420)}ms`}>
               <Entry
                 entry={e}
@@ -125,6 +177,15 @@
 
     <footer class="rv" use:reveal>
       <button class="btn btn-primary" onclick={rescan}>Search the river again</button>
+      {#if driftwoodPaths.length > 0}
+        <button
+          class="btn-quiet"
+          onclick={revealAllDriftwood}
+          title="Opens one Finder window per folder, every Driftwood item preselected — select all and press Cmd+Delete yourself."
+        >
+          Reveal {formatCount(driftwoodPaths.length)} Driftwood in Finder
+        </button>
+      {/if}
       <p class="foot-note">DriftWood deleted nothing. It never does.</p>
     </footer>
   </div>
@@ -194,6 +255,22 @@
   .count {
     font-size: 14px;
     color: var(--ink-soft);
+    transition: color 0.25s;
+  }
+
+  .count.on {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  .filter-note {
+    font-size: 13px;
+    color: var(--river-deep);
+    margin-top: 10px;
+  }
+
+  .filter-note strong {
+    font-weight: 560;
   }
 
   .warnings p {

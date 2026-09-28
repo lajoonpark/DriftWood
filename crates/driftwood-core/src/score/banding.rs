@@ -71,12 +71,12 @@ mod tests {
 
     #[test]
     fn quantile_banding() {
-        // 100 candidates, 15% / 70% / 15%.
+        // 100 candidates, 25% / 50% / 25% (ties at the boundary stay middle).
         let scores: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let bands = bands_for(&scores, &Banding::default());
-        assert_eq!(bands.iter().filter(|b| **b == Band::High).count(), 14);
-        assert_eq!(bands.iter().filter(|b| **b == Band::Low).count(), 14);
-        assert_eq!(bands.iter().filter(|b| **b == Band::Middle).count(), 72);
+        assert_eq!(bands.iter().filter(|b| **b == Band::High).count(), 24);
+        assert_eq!(bands.iter().filter(|b| **b == Band::Low).count(), 24);
+        assert_eq!(bands.iter().filter(|b| **b == Band::Middle).count(), 52);
         // Highest score is high, lowest is low.
         assert_eq!(bands[99], Band::High);
         assert_eq!(bands[0], Band::Low);

@@ -256,6 +256,7 @@ async fn cmd_scan(
         stage2: llm,
         model: model.unwrap_or_else(|| driftwood_core::default_model().to_string()),
         api_key,
+        allow_non_zdr: false,
         rules,
         tuning,
         persist: true,

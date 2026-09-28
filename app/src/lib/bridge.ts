@@ -13,6 +13,7 @@ import { MOCK_REPORT, mockScanEvents } from "./mock";
  *   last_report() -> Report | null
  *   correct_tier(id, tier, note?)
  *   reveal_path(path)             — `open -R <path>`
+ *   reveal_paths(paths)           — `open -R <paths…>`, grouped by folder
  * In the browser (and until the shell is wired) a mock bridge answers, so
  * every screen is fully reviewable in `npm run dev`.
  */
@@ -28,6 +29,8 @@ export interface Bridge {
   getLastReport(): Promise<Report | null>;
   correctTier(id: string, tier: Tier): Promise<void>;
   reveal(path: string): void;
+  /** Reveal many paths at once (bulk triage); grouped per folder. */
+  revealAll(paths: string[]): void;
 }
 
 const w = () => window as unknown as {
@@ -68,6 +71,9 @@ class TauriBridge implements Bridge {
   }
   reveal(path: string): void {
     void tauriInvoke("reveal_path", { path });
+  }
+  revealAll(paths: string[]): void {
+    void tauriInvoke("reveal_paths", { paths });
   }
 }
 
@@ -116,6 +122,9 @@ class MockBridge implements Bridge {
   }
   reveal(): void {
     /* mock — would run `open -R <path>` */
+  }
+  revealAll(): void {
+    /* mock — would run `open -R` with grouped paths */
   }
 }
 

@@ -1,6 +1,7 @@
 //! OpenRouter client (plan §3.3.1): enforces `provider.zdr = true` +
-//! `data_collection: deny` on EVERY call, timeouts + retries with backoff,
-//! JSON-mode-friendly, cost accounting from `usage`.
+//! `data_collection: deny` on EVERY call unless the user explicitly opted
+//! out of ZDR-only routing (settings "Danger zone"), timeouts + retries
+//! with backoff, JSON-mode-friendly, cost accounting from `usage`.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,19 +16,27 @@ pub trait Transport: Send + Sync {
 }
 
 /// Build the request body for OpenRouter. Pure function — golden-testable.
-pub fn build_request_body(model: &str, system: &str, user: &str) -> serde_json::Value {
-    serde_json::json!({
+///
+/// `enforce_zdr` restricts routing to zero-data-retention providers; when
+/// false the `provider` block is omitted entirely so OpenRouter routes
+/// freely (needed for most free / non-ZDR models). There is no middle
+/// ground by design: either the full privacy posture or none of it.
+pub fn build_request_body(model: &str, system: &str, user: &str, enforce_zdr: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user}
         ],
         "response_format": {"type": "json_object"},
-        "provider": {
+    });
+    if enforce_zdr {
+        body["provider"] = serde_json::json!({
             "zdr": true,
             "data_collection": "deny"
-        }
-    })
+        });
+    }
+    body
 }
 
 pub fn auth_headers(api_key: &str) -> Vec<(String, String)> {
@@ -196,12 +205,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_body_always_enforces_zdr() {
-        let body = build_request_body("openai/gpt-4o-mini", "sys", "user");
+    fn request_body_enforces_zdr_by_default() {
+        let body = build_request_body("openai/gpt-4o-mini", "sys", "user", true);
         let provider = &body["provider"];
         assert_eq!(provider["zdr"], serde_json::json!(true));
         assert_eq!(provider["data_collection"], serde_json::json!("deny"));
         assert_eq!(body["model"], serde_json::json!("openai/gpt-4o-mini"));
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn request_body_without_zdr_omits_provider_block() {
+        let body = build_request_body("openai/gpt-4o-mini", "sys", "user", false);
+        assert!(body.get("provider").is_none());
+        // Everything else is unchanged — only the routing posture relaxes.
+        assert_eq!(body["model"], serde_json::json!("openai/gpt-4o-mini"));
+        assert_eq!(body["response_format"]["type"], serde_json::json!("json_object"));
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
 

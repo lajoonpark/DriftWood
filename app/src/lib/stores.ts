@@ -50,6 +50,8 @@ export const SCOPE_FOLDERS: Record<ScopeCategory, { path: string; hint: string }
 export const DEFAULT_SETTINGS = {
   model: "anthropic/claude-haiku-4.5",
   costCap: 0.5,
+  expressScan: false,
+  allowNonZdr: false,
 };
 
 /* ---------- persisted tuning (model, cost cap, OpenRouter key) ---------- */
@@ -63,6 +65,13 @@ export interface AppSettings {
   costCap: number;
   /** OpenRouter API key (sk-or-…). Stays on this machine. */
   apiKey: string;
+  /** Express Scan: skip AI reasoning entirely — heuristic tiers only,
+   *  instant and free. Honest about it in the report. */
+  expressScan: boolean;
+  /** Danger zone: when false (default), every Stage-2 call is routed only
+   *  to zero-data-retention providers. When true, OpenRouter may route to
+   *  any provider — required for most free models, not recommended. */
+  allowNonZdr: boolean;
 }
 
 function loadSettings(): AppSettings {

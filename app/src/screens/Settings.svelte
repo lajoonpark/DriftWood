@@ -1,5 +1,6 @@
 <script lang="ts">
   import Waters from "../components/Waters.svelte";
+  import Toggle from "../components/Toggle.svelte";
   import { reveal } from "../lib/motion";
   import {
     onboarding,
@@ -181,6 +182,38 @@
     saveOnboarding(s);
   }
 
+  /* ---------- Danger zone: non-ZDR routing ---------- */
+
+  let zdrConfirm = $state(false);
+
+  function toggleZdr(v: boolean) {
+    if (v) {
+      // Enabling is a two-step: the toggle only arms the inline
+      // confirmation — the user must accept the consequences explicitly.
+      zdrConfirm = true;
+    } else {
+      tune.allowNonZdr = false;
+      zdrConfirm = false;
+      saveTune();
+    }
+  }
+
+  function confirmZdr() {
+    tune.allowNonZdr = true;
+    zdrConfirm = false;
+    saveTune();
+  }
+
+  function cancelZdr() {
+    zdrConfirm = false;
+  }
+
+  const ZDR_OFF_HINT =
+    "On by default — recommended. Every river crossing is routed only to providers that never keep your prompts (OpenRouter's zero-data-retention policy). Most free models don't qualify, so they can't be used while this is off.";
+
+  const ZDR_ON_HINT =
+    "Not recommended. Requests may now be routed to any provider, including free ones — which usually pay for themselves by logging or training on what you send. Only what your privacy tier allows still travels (paths and names at Standard, plus a one-level folder listing at Deep; never file contents). Nothing on your Mac changes — this only loosens where the thinking happens, and it does nothing at Minimal, where nothing leaves your machine anyway.";
+
   function saveWaters() {
     saveOnboarding(s);
   }
@@ -208,7 +241,9 @@
         {s.privacy === "minimal"
           ? "Nothing leaves your machine. Judged by shape alone."
           : s.privacy === "standard"
-            ? "Paths and names travel, contents never do. ZDR providers only."
+            ? tune.allowNonZdr
+              ? "Paths and names travel, contents never do. ZDR-only routing is off (danger zone below)."
+              : "Paths and names travel, contents never do. ZDR providers only."
             : "Adds a one-level folder listing for ambiguous items. Most expensive."}
       </p>
     </section>
@@ -343,11 +378,40 @@
       </ul>
       <div class="block-actions">
         <button class="btn-quiet">Open memory folder</button>
+      </div>
+    </section>
+
+    <section class="card block danger-zone rv" use:reveal style="--rv-delay:820ms">
+      <h2>Danger zone</h2>
+
+      <div class="dz-row">
+        <div class="dz-text">
+          <p class="dz-title">Allow providers that keep your data</p>
+          <p class="hint">{tune.allowNonZdr ? ZDR_ON_HINT : ZDR_OFF_HINT}</p>
+        </div>
+        <Toggle checked={tune.allowNonZdr} label="Allow non-ZDR providers" onchange={toggleZdr} />
+      </div>
+
+      {#if zdrConfirm}
+        <div class="dz-confirm">
+          <p>
+            With ZDR-only routing off, whatever your privacy tier lets travel can reach
+            providers that may keep it or train on it. Free models usually pay for
+            themselves that way. DriftWood won't stop you — but this is not recommended.
+          </p>
+          <div class="dz-actions">
+            <button class="btn-quiet" onclick={cancelZdr}>Keep my data protected</button>
+            <button class="btn-quiet danger" onclick={confirmZdr}>Allow anyway</button>
+          </div>
+        </div>
+      {/if}
+
+      <div class="block-actions">
         <button class="btn-quiet danger" onclick={resetEverything}>Forget everything</button>
       </div>
     </section>
 
-    <footer class="rv" use:reveal style="--rv-delay:880ms">
+    <footer class="rv" use:reveal style="--rv-delay:940ms">
       <button class="btn btn-ghost" onclick={onBack}>Back</button>
     </footer>
   </div>
@@ -612,6 +676,66 @@
     display: flex;
     gap: 24px;
     margin-top: 16px;
+  }
+
+  /* ---------- Danger zone ---------- */
+
+  .danger-zone {
+    border-color: rgba(168, 85, 47, 0.35);
+  }
+
+  .danger-zone h2 {
+    color: var(--warn);
+    font-weight: 500;
+  }
+
+  .dz-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 20px;
+  }
+
+  .dz-text {
+    flex: 1;
+  }
+
+  .dz-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .dz-text .hint {
+    margin-top: 4px;
+  }
+
+  .dz-confirm {
+    margin-top: 14px;
+    padding: 14px 16px;
+    border: 1px solid rgba(168, 85, 47, 0.4);
+    border-radius: 12px;
+    background: rgba(168, 85, 47, 0.07);
+  }
+
+  .dz-confirm p {
+    font-size: 13px;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+
+  .dz-actions {
+    display: flex;
+    gap: 20px;
+    margin-top: 12px;
+  }
+
+  .dz-confirm .danger {
+    color: var(--warn);
+    border-color: rgba(168, 85, 47, 0.45);
+  }
+
+  .dz-confirm .danger:hover {
+    background: rgba(168, 85, 47, 0.1);
   }
 
   .danger:hover {

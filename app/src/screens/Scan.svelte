@@ -3,9 +3,10 @@
   import RiverArt from "../components/RiverArt.svelte";
   import StatusLine from "../components/StatusLine.svelte";
   import Counter from "../components/Counter.svelte";
+  import Toggle from "../components/Toggle.svelte";
   import { bridge } from "../lib/bridge";
   import { formatBytes, formatCount } from "../lib/format";
-  import { onboarding, scan, toast, SCOPE_FOLDERS, appSettings } from "../lib/stores";
+  import { onboarding, scan, toast, SCOPE_FOLDERS, appSettings, saveSettings } from "../lib/stores";
   import { PRIVACY_LABELS, type Report, type ScanConfig } from "../lib/types";
 
   let { onDone }: { onDone: () => void } = $props();
@@ -22,10 +23,13 @@
     return {
       scopes,
       privacy_tier: s.privacy,
-      stage2: true,
+      // Express Scan: skip Stage 2 entirely — heuristic tiers only,
+      // instant and free, honestly labeled as fallback in the report.
+      stage2: !$appSettings.expressScan,
       model: $appSettings.model,
       api_key: $appSettings.apiKey.trim() || undefined,
       cost_cap_usd: $appSettings.costCap,
+      allow_non_zdr: $appSettings.allowNonZdr,
     };
   });
 
@@ -61,6 +65,10 @@
 
   function cancel() {
     bridge.cancelScan();
+  }
+
+  function setExpress(v: boolean) {
+    saveSettings({ ...$appSettings, expressScan: v });
   }
 
   const intensity = $derived(st.running ? 2 : 1);
@@ -115,6 +123,17 @@
         <p class="scope-line" in:fade={{ duration: 600, delay: 560 }}>
           {scopeSummary} · cap ${$appSettings.costCap.toFixed(2)}
         </p>
+        <label class="express" in:fade={{ duration: 600, delay: 660 }}>
+          <Toggle
+            checked={$appSettings.expressScan}
+            onchange={setExpress}
+            label="Skip AI reasoning"
+          />
+          <span class="express-copy">
+            Skip AI reasoning
+            <span class="express-hint">— fast, free, heuristic tiers only</span>
+          </span>
+        </label>
         <div class="actions" in:fly={{ y: 14, duration: 600, delay: 780 }}>
           <button class="btn btn-primary cta" onclick={start}>Search the river</button>
           {#if st.report}
@@ -161,6 +180,20 @@
     font-size: 13px;
     color: var(--ink-faint);
     letter-spacing: 0.06em;
+  }
+
+  .express {
+    margin-top: 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    font-size: 13.5px;
+    color: var(--ink-soft);
+  }
+
+  .express-hint {
+    color: var(--ink-faint);
   }
 
   .actions {

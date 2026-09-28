@@ -100,6 +100,7 @@ pub async fn reason_middle_band(
     cfg: &Reasoning,
     model: &str,
     api_key: &str,
+    enforce_zdr: bool,
     scan_id: &str,
     few_shot: &[serde_json::Value],
     sink: &dyn EventSink,
@@ -108,7 +109,8 @@ pub async fn reason_middle_band(
     let transport = ReqwestTransport::new(Duration::from_secs(cfg.timeout_secs))?;
     let persist = Some(batch_persist_path(scan_id));
     reason_middle_band_with(
-        middle, privacy, cfg, model, api_key, scan_id, few_shot, sink, cancel, &transport, persist,
+        middle, privacy, cfg, model, api_key, enforce_zdr, scan_id, few_shot, sink, cancel,
+        &transport, persist,
     )
     .await
 }
@@ -127,6 +129,7 @@ pub async fn reason_middle_band_with<T: client::Transport>(
     cfg: &Reasoning,
     model: &str,
     api_key: &str,
+    enforce_zdr: bool,
     scan_id: &str,
     few_shot: &[serde_json::Value],
     sink: &dyn EventSink,
@@ -137,6 +140,12 @@ pub async fn reason_middle_band_with<T: client::Transport>(
     sink.emit(ScanEvent::Phase {
         phase: Phase::Reasoning,
     });
+
+    if !enforce_zdr {
+        sink.emit(ScanEvent::Warn {
+            message: "ZDR-only routing is off — judgments may be processed by providers that retain prompts".into(),
+        });
+    }
 
     let mut judgments: HashMap<String, LlmJudgment> = HashMap::new();
     let mut fallback_ids = HashSet::new();
@@ -191,7 +200,7 @@ pub async fn reason_middle_band_with<T: client::Transport>(
             continue;
         }
 
-        match run_one_batch(&pending, privacy, model, api_key, cfg, few_shot, sink, transport, persist_path.as_deref()).await {
+        match run_one_batch(&pending, privacy, model, api_key, enforce_zdr, cfg, few_shot, sink, transport, persist_path.as_deref()).await {
             Ok((cost, accepted)) => {
                 total_cost += cost;
                 let wanted: HashSet<&str> = pending.iter().map(|c| c.id.as_str()).collect();
@@ -241,6 +250,7 @@ async fn run_one_batch<T: client::Transport>(
     privacy: PrivacyTier,
     model: &str,
     api_key: &str,
+    enforce_zdr: bool,
     cfg: &Reasoning,
     few_shot: &[serde_json::Value],
     sink: &dyn EventSink,
@@ -267,9 +277,10 @@ async fn run_one_batch<T: client::Transport>(
 
     let payloads = pl::build_batch_payloads(batch, privacy, &deep_listings, deep_cap);
     let user = pr::build_user_prompt(&payloads, few_shot);
-    let body =
-        serde_json::to_string(&oc::build_request_body(model, pr::SYSTEM_PROMPT, &user))
-            .map_err(|e| DriftError::Reason(e.to_string()))?;
+    let body = serde_json::to_string(&oc::build_request_body(
+        model, pr::SYSTEM_PROMPT, &user, enforce_zdr,
+    ))
+    .map_err(|e| DriftError::Reason(e.to_string()))?;
     let headers = oc::auth_headers(api_key);
 
     sink.emit(ScanEvent::notice(format!(
@@ -418,6 +429,7 @@ mod tests {
             &Reasoning::default(),
             "test-model",
             "key",
+            true,
             "test-happy",
             &[],
             sink().as_ref(),
@@ -446,6 +458,7 @@ mod tests {
             &cfg,
             "m",
             "k",
+            true,
             "test-fail",
             &[],
             sink().as_ref(),
@@ -478,6 +491,7 @@ mod tests {
             &cfg,
             "m",
             "k",
+            true,
             "test-cap",
             &[],
             sink().as_ref(),
@@ -506,6 +520,7 @@ mod tests {
             &Reasoning::default(),
             "m",
             "k",
+            true,
             "test-partial",
             &[],
             sink().as_ref(),
@@ -529,6 +544,7 @@ mod tests {
             &Reasoning::default(),
             "m",
             "k",
+            true,
             "test-cancel",
             &[],
             sink().as_ref(),

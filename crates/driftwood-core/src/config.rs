@@ -53,8 +53,8 @@ pub struct Banding {
 impl Default for Banding {
     fn default() -> Self {
         Self {
-            high_quantile: 0.15,
-            low_quantile: 0.15,
+            high_quantile: 0.25,
+            low_quantile: 0.25,
             small_list_threshold: 20,
             high_absolute: 75.0,
             low_absolute: 25.0,
@@ -163,6 +163,12 @@ pub struct ScanConfig {
     /// OpenRouter API key. Read from the environment by the wrappers, never
     /// hardcoded or persisted by core.
     pub api_key: Option<String>,
+    /// When false (default), every Stage-2 call is routed only to
+    /// zero-data-retention providers (`zdr: true` + `data_collection: deny`).
+    /// Opting in via the settings "Danger zone" drops that restriction so
+    /// non-ZDR models (most free ones) can serve the river — an explicit
+    /// user decision, never a default.
+    pub allow_non_zdr: bool,
     /// Rules snapshot (from the memory folder) applied before any LLM call.
     pub rules: Vec<Rule>,
     pub tuning: DriftTuning,
@@ -180,6 +186,7 @@ impl Default for ScanConfig {
             stage2: false,
             model: default_model().to_string(),
             api_key: None,
+            allow_non_zdr: false,
             rules: Vec::new(),
             tuning: DriftTuning::default(),
             persist: true,
@@ -202,7 +209,7 @@ mod tests {
         let s = t.to_toml_string();
         let t2 = DriftTuning::from_toml_str(&s).unwrap();
         assert_eq!(t2.weights.size, 25.0);
-        assert_eq!(t2.banding.high_quantile, 0.15);
+        assert_eq!(t2.banding.high_quantile, 0.25);
     }
 
     #[test]

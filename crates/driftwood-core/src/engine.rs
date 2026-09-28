@@ -467,6 +467,25 @@ pub async fn run_scan(
         }
     }
 
+    // ---- Folder-type auto-High (newideas Fix C) ----------------------------
+    // Cache/log roots in the Low scope are driftwood by definition — the
+    // relative banding quantiles would otherwise send hundreds of obvious
+    // cache folders to the LLM. Upgraded AFTER banding + pinning so
+    // assign_bands can't overwrite it and user rules still see the
+    // quantile band in their features; rules and never-flag still win.
+    let mut auto_highed = 0usize;
+    for c in candidates.iter_mut() {
+        if c.band == Band::Middle && is_definitionally_driftwood(Path::new(&c.path), &home, c.orphan_status) {
+            c.band = Band::High;
+            auto_highed += 1;
+        }
+    }
+    if auto_highed > 0 {
+        sink.emit(ScanEvent::notice(format!(
+            "{auto_highed} cache-root folders scored straight to driftwood (no AI needed)"
+        )));
+    }
+
     // ---- Stage 2 (LLM) ------------------------------------------------------
     let mut outcome: Option<ReasonOutcome> = None;
     let middle: Vec<Candidate> = candidates
@@ -527,6 +546,7 @@ pub async fn run_scan(
                 &tuning.reasoning,
                 &config.model,
                 &api_key,
+                !config.allow_non_zdr,
                 &scan_id,
                 &few_shot,
                 &*sink,
@@ -686,6 +706,24 @@ fn finish(input: AssembleInput, persist: bool) -> Result<Report> {
     Ok(r)
 }
 
+/// Cache roots whose contents are driftwood by definition: caches, logs,
+/// temp dirs, and folders left behind by uninstalled apps under
+/// Application Support. Their top-level units are never sent to the LLM.
+fn is_definitionally_driftwood(path: &Path, home: &Path, orphan: OrphanStatus) -> bool {
+    let cache_roots = [
+        home.join("Library/Caches"),
+        home.join("Library/Logs"),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/private/tmp"),
+    ];
+    if cache_roots.iter().any(|r| path.starts_with(r)) {
+        return true;
+    }
+    // Orphaned Application Support: the owning app is gone.
+    orphan == OrphanStatus::Orphaned
+        && path.starts_with(home.join("Library/Application Support"))
+}
+
 // ---------------------------------------------------------------------------
 // apply_correction — the second entry point (plan §1)
 // ---------------------------------------------------------------------------
@@ -766,4 +804,75 @@ pub fn load_rules(memory_dir_override: Option<PathBuf>) -> Result<Vec<Rule>> {
 /// Rule source helper for the MCP wrapper.
 pub fn rule_source_is_user(rule: &Rule) -> bool {
     rule.source == RuleSource::User
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home() -> PathBuf {
+        PathBuf::from("/Users/tester")
+    }
+
+    #[test]
+    fn cache_roots_are_driftwood() {
+        let h = home();
+        assert!(is_definitionally_driftwood(
+            &h.join("Library/Caches/com.google.Chrome"),
+            &h,
+            OrphanStatus::Unknown
+        ));
+        assert!(is_definitionally_driftwood(
+            &h.join("Library/Logs/DiagnosticReports"),
+            &h,
+            OrphanStatus::Unknown
+        ));
+        assert!(is_definitionally_driftwood(
+            Path::new("/tmp/build-cache"),
+            &h,
+            OrphanStatus::Unknown
+        ));
+        assert!(is_definitionally_driftwood(
+            Path::new("/private/tmp/build-cache"),
+            &h,
+            OrphanStatus::Unknown
+        ));
+    }
+
+    #[test]
+    fn orphaned_app_support_is_driftwood() {
+        let h = home();
+        assert!(is_definitionally_driftwood(
+            &h.join("Library/Application Support/OldApp"),
+            &h,
+            OrphanStatus::Orphaned
+        ));
+        // Active app support folders are NOT auto-high.
+        assert!(!is_definitionally_driftwood(
+            &h.join("Library/Application Support/ActiveApp"),
+            &h,
+            OrphanStatus::Active
+        ));
+    }
+
+    #[test]
+    fn personal_folders_are_not_auto_high() {
+        let h = home();
+        assert!(!is_definitionally_driftwood(
+            &h.join("Library/Application Support/ActiveApp"),
+            &h,
+            OrphanStatus::Unknown
+        ));
+        assert!(!is_definitionally_driftwood(
+            &h.join("Documents/notes"),
+            &h,
+            OrphanStatus::Unknown
+        ));
+        // A cache-named folder OUTSIDE the cache roots is not auto-high.
+        assert!(!is_definitionally_driftwood(
+            &h.join("Library/Containers/com.app/cache"),
+            &h,
+            OrphanStatus::Unknown
+        ));
+    }
 }
