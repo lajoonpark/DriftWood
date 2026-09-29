@@ -66,8 +66,16 @@ impl Default for Banding {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Reasoning {
-    /// Candidates per score-proximity batch (plan: 20–30).
+    /// Candidates per score-proximity batch. Raised from the old 25 (tuned
+    /// for expensive frontier models with long traces): the middle band is
+    /// structured JSON classification with no reasoning trace, so ~80 short
+    /// judgments per call is well inside every practical context window and
+    /// cuts round trips by 3×. Clamp stays 1..=100.
     pub batch_size: usize,
+    /// Representative batches in flight at once. 5 keeps OpenRouter's
+    /// per-key rate limits and our per-batch retry pressure comfortable
+    /// while cutting wall-clock time ~5× vs. the old serial loop.
+    pub max_concurrent_batches: usize,
     /// Hard per-scan USD cap; 0 disables the cap.
     pub cost_cap_usd: f64,
     /// HTTP timeout per LLM call, seconds.
@@ -83,7 +91,8 @@ pub struct Reasoning {
 impl Default for Reasoning {
     fn default() -> Self {
         Self {
-            batch_size: 25,
+            batch_size: 80,
+            max_concurrent_batches: 5,
             cost_cap_usd: 0.50,
             timeout_secs: 120,
             retries: 2,

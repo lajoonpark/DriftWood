@@ -92,6 +92,21 @@ impl EventSink for MemorySink {
             ScanEvent::BytesSearched { total } => format!("bytes searched: {total}"),
             ScanEvent::CandidatesFound { total } => format!("candidates: {total}"),
             ScanEvent::RecoverableBytes { total } => format!("recoverable bytes: {total}"),
+            ScanEvent::ReasoningProgress {
+                judged,
+                total,
+                cost_usd,
+                ..
+            } => format!(
+                "reasoned: {judged}/{total} · {} so far",
+                driftwood_core::reason::format_cost(cost_usd)
+            ),
+            ScanEvent::BatchStarted { index, total_batches } => {
+                format!("batch {index}/{total_batches} started")
+            }
+            ScanEvent::BatchFinished { index, total_batches } => {
+                format!("batch {index}/{total_batches} finished")
+            }
             ScanEvent::Notice { message } => message,
             ScanEvent::Warn { message } => format!("warn: {message}"),
             ScanEvent::Error { message } => format!("error: {message}"),

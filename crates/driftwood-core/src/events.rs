@@ -40,6 +40,29 @@ pub enum ScanEvent {
     RecoverableBytes {
         total: u64,
     },
+    /// Stage 2 progress. `judged`/`total` are real middle-band item counts
+    /// (cluster propagation included); cost/token totals are actual spend
+    /// so far, only finalized when a streamed call ends. This is the only
+    /// phase with a knowable denominator — UI must not render a percentage
+    /// for the walk/sizing phases from this feed.
+    ReasoningProgress {
+        judged: u64,
+        total: u64,
+        cost_usd: f64,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    },
+    /// A representative batch was dispatched (1-based index; `total_batches`
+    /// is the deduplicated batch count — the ETA's true denominator).
+    BatchStarted {
+        index: u64,
+        total_batches: u64,
+    },
+    /// A representative batch settled (success, failure, or abort).
+    BatchFinished {
+        index: u64,
+        total_batches: u64,
+    },
     /// Themed-detail feed for disclosure arrows (raw queries, LLM thinking).
     Notice {
         message: String,

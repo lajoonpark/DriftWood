@@ -1,6 +1,6 @@
 [package]
 name = "driftwood-app"
-version = "1.2.0"
+version = "1.3.0"
 description = "DriftWood — AI-assisted scan of unused files, folders, and apps (read-only reporting)"
 edition = "2021"
 

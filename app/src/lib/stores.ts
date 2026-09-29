@@ -15,6 +15,7 @@ export type View =
   | "privacy"
   | "scan"
   | "report"
+  | "browser"
   | "settings";
 
 /* ---------- persistent app state ---------- */
@@ -154,36 +155,93 @@ export function markOnboarded() {
 
 export type FeedLine = { type: "notice" | "warn"; message: string };
 
+/** Live Stage 2 state, fed by reasoning_progress / batch events. Only the
+ *  Reasoning phase has a knowable denominator — the UI must not render a
+ *  percentage for the walk/sizing phases. Speed and ETA are EMAs computed
+ *  here so they visibly settle instead of swinging on the first batches. */
+export interface ReasoningState {
+  judged: number;
+  total: number;
+  costUsd: number;
+  promptTokens: number;
+  completionTokens: number;
+  batchesStarted: number;
+  batchesFinished: number;
+  totalBatches: number;
+  /* runtime-derived, not part of the wire contract */
+  startedAt: number;
+  lastBatchAt: number;
+  lastProgressAt: number;
+  lastJudged: number;
+  /** items/sec, EMA */
+  speed: number;
+  /** ms per batch, EMA (ETA denominator = remaining batches) */
+  batchEmaMs: number;
+}
+
 export interface ScanState {
   running: boolean;
+  /** Set when the user clicks Pull ashore; stays until the scan resolves. */
+  stopping: boolean;
   phase: Phase | null;
   filesSearched: number;
   bytesSearched: number;
   candidates: number;
   recoverableBytes: number;
+  reasoning: ReasoningState | null;
   feed: FeedLine[];
   error: string | null;
   report: Report | null;
 }
 
+function initialReasoning(): ReasoningState {
+  return {
+    judged: 0,
+    total: 0,
+    costUsd: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    batchesStarted: 0,
+    batchesFinished: 0,
+    totalBatches: 0,
+    startedAt: 0,
+    lastBatchAt: 0,
+    lastProgressAt: 0,
+    lastJudged: 0,
+    speed: 0,
+    batchEmaMs: 0,
+  };
+}
+
 const initialScan: ScanState = {
   running: false,
+  stopping: false,
   phase: null,
   filesSearched: 0,
   bytesSearched: 0,
   candidates: 0,
   recoverableBytes: 0,
+  reasoning: null,
   feed: [],
   error: null,
   report: null,
 };
+
+/** EMA factor: heavy enough to settle after the first two batches,
+ *  light enough to track a real change in pace. */
+const EMA = 0.35;
 
 function createScanStore() {
   const { subscribe, set, update } = writable<ScanState>(initialScan);
 
   return {
     subscribe,
-    reset: () => set({ ...initialScan, report: get(scan).report }),
+    reset: () =>
+      set({
+        ...initialScan,
+        report: get(scan).report,
+      }),
+    setStopping: () => update((s) => ({ ...s, stopping: true })),
     applyEvent: (e: ScanEvent) =>
       update((s) => {
         switch (e.type) {
@@ -197,6 +255,62 @@ function createScanStore() {
             return { ...s, candidates: Math.max(s.candidates, e.total) };
           case "recoverable_bytes":
             return { ...s, recoverableBytes: Math.max(s.recoverableBytes, e.total) };
+          case "reasoning_progress": {
+            const now = Date.now();
+            const r = s.reasoning ?? initialReasoning();
+            const prevAt = r.lastProgressAt;
+            const deltaItems = Math.max(0, e.judged - r.lastJudged);
+            const rate =
+              prevAt > 0 && now > prevAt
+                ? deltaItems / ((now - prevAt) / 1000)
+                : 0;
+            return {
+              ...s,
+              reasoning: {
+                ...r,
+                judged: e.judged,
+                total: e.total,
+                costUsd: e.cost_usd,
+                promptTokens: e.prompt_tokens,
+                completionTokens: e.completion_tokens,
+                lastProgressAt: now,
+                lastJudged: e.judged,
+                speed:
+                  r.speed === 0 ? rate : EMA * rate + (1 - EMA) * r.speed,
+              },
+            };
+          }
+          case "batch_started": {
+            const r = s.reasoning ?? initialReasoning();
+            return {
+              ...s,
+              reasoning: {
+                ...r,
+                batchesStarted: r.batchesStarted + 1,
+                totalBatches: Math.max(r.totalBatches, e.total_batches),
+                startedAt: r.startedAt || Date.now(),
+              },
+            };
+          }
+          case "batch_finished": {
+            const now = Date.now();
+            const r = s.reasoning ?? initialReasoning();
+            const duration =
+              r.lastBatchAt > 0 && now > r.lastBatchAt ? now - r.lastBatchAt : 0;
+            return {
+              ...s,
+              reasoning: {
+                ...r,
+                batchesFinished: r.batchesFinished + 1,
+                totalBatches: Math.max(r.totalBatches, e.total_batches),
+                lastBatchAt: now,
+                batchEmaMs:
+                  r.batchEmaMs === 0 || duration === 0
+                    ? r.batchEmaMs || duration
+                    : EMA * duration + (1 - EMA) * r.batchEmaMs,
+              },
+            };
+          }
           case "notice":
           case "warn":
             return { ...s, feed: [...s.feed, e as FeedLine] };
@@ -204,8 +318,15 @@ function createScanStore() {
             return { ...s, error: e.message, running: false };
         }
       }),
-    setRunning: (running: boolean) => update((s) => ({ ...s, running })),
-    setReport: (report: Report) => update((s) => ({ ...s, report, running: false })),
+    setRunning: (running: boolean) =>
+      update((s) => ({
+        ...s,
+        running,
+        stopping: running ? false : s.stopping,
+        reasoning: running ? null : s.reasoning,
+      })),
+    setReport: (report: Report) =>
+      update((s) => ({ ...s, report, running: false, stopping: false })),
   };
 }
 

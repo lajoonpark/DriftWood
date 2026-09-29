@@ -1,4 +1,4 @@
-import type { Report, ScanConfig, ScanEvent, Tier } from "./types";
+import type { Report, RevealSummary, ScanConfig, ScanEvent, Tier } from "./types";
 import { MOCK_REPORT, mockScanEvents } from "./mock";
 
 /**
@@ -13,7 +13,9 @@ import { MOCK_REPORT, mockScanEvents } from "./mock";
  *   last_report() -> Report | null
  *   correct_tier(id, tier, note?)
  *   reveal_path(path)             — `open -R <path>`
- *   reveal_paths(paths)           — `open -R <paths…>`, grouped by folder
+ *   reveal_paths(paths) -> RevealSummary
+ *                                 — ONE `open -R`, one window per folder,
+ *                                   capped; the summary says what opened
  * In the browser (and until the shell is wired) a mock bridge answers, so
  * every screen is fully reviewable in `npm run dev`.
  */
@@ -29,8 +31,10 @@ export interface Bridge {
   getLastReport(): Promise<Report | null>;
   correctTier(id: string, tier: Tier): Promise<void>;
   reveal(path: string): void;
-  /** Reveal many paths at once (bulk triage); grouped per folder. */
-  revealAll(paths: string[]): void;
+  /** Hand a selection off to Finder (one window per folder, capped at a
+   *  handful of windows — never a flood). Resolves with what actually
+   *  opened so the UI can tell the user the truth. */
+  revealAll(paths: string[]): Promise<RevealSummary>;
 }
 
 const w = () => window as unknown as {
@@ -72,8 +76,8 @@ class TauriBridge implements Bridge {
   reveal(path: string): void {
     void tauriInvoke("reveal_path", { path });
   }
-  revealAll(paths: string[]): void {
-    void tauriInvoke("reveal_paths", { paths });
+  revealAll(paths: string[]): Promise<RevealSummary> {
+    return tauriInvoke<RevealSummary>("reveal_paths", { paths });
   }
 }
 
@@ -123,8 +127,21 @@ class MockBridge implements Bridge {
   reveal(): void {
     /* mock — would run `open -R <path>` */
   }
-  revealAll(): void {
-    /* mock — would run `open -R` with grouped paths */
+  async revealAll(paths: string[]): Promise<RevealSummary> {
+    await sleep(700);
+    const groups = new Map<string, number>();
+    for (const p of paths) {
+      const parent = p.split("/").slice(0, -1).join("/");
+      groups.set(parent, (groups.get(parent) ?? 0) + 1);
+    }
+    const sizes = [...groups.values()].sort((a, b) => b - a);
+    const windows = Math.min(sizes.length, 3);
+    return {
+      windows,
+      items: sizes.slice(0, windows).reduce((n, s) => n + s, 0),
+      skipped_groups: Math.max(0, sizes.length - windows),
+      skipped_items: sizes.slice(windows).reduce((n, s) => n + s, 0),
+    };
   }
 }
 

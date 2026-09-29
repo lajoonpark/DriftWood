@@ -23,6 +23,7 @@
     auto_low: { text: "kept safely upstream" },
     rule: { text: "pinned by your own rule" },
     llm: { text: "judged by the river" },
+    llm_propagated: { text: "shared verdict — its whole cluster was judged once" },
     fallback: { text: "snagged — heuristic guess", warn: true },
     never_flag: { text: "protected — never flagged" },
   };

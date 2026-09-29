@@ -151,6 +151,7 @@ pub async fn run_scan(
                 model: None,
                 llm_cost_usd: 0.0,
                 cost_cap_hit: false,
+                stopped_early: false,
                 counters: counters.snapshot(),
                 entries: vec![],
                 warnings: vec![],
@@ -255,6 +256,7 @@ pub async fn run_scan(
                 model: None,
                 llm_cost_usd: 0.0,
                 cost_cap_hit: false,
+                stopped_early: false,
                 counters: counters.snapshot(),
                 entries: vec![],
                 warnings: warns,
@@ -549,13 +551,16 @@ pub async fn run_scan(
                 !config.allow_non_zdr,
                 &scan_id,
                 &few_shot,
-                &*sink,
-                &handle.cancel,
+                sink.clone(),
+                handle.cancel.clone(),
             )
             .await
             {
                 Ok(o) => outcome = Some(o),
-                Err(DriftError::Cancelled) => return Err(DriftError::Cancelled),
+                // Cancel during reasoning is no longer fatal: the partial
+                // outcome (fallback-labeled remainder) is returned as the
+                // report. Early-phase cancels above still abort outright —
+                // there is nothing worth reporting yet.
                 Err(e) => {
                     sink.emit(ScanEvent::warn(format!("river crossing failed: {e}")));
                     warns.push(ReportWarning {
@@ -573,6 +578,9 @@ pub async fn run_scan(
     }
 
     // ---- Assemble entries ----------------------------------------------------
+    sink.emit(ScanEvent::Phase {
+        phase: Phase::Assembling,
+    });
     let mut entries: Vec<ReportEntry> = Vec::with_capacity(candidates.len());
     let mut fallback_count = 0usize;
     for c in &candidates {
@@ -624,6 +632,19 @@ pub async fn run_scan(
                             Some(config.model.clone()),
                         )
                     }
+                    (Band::Middle, Some(o)) if o.propagated_judgments.contains_key(&c.id) => {
+                        // One shared cluster verdict, honestly labeled —
+                        // never presented as an independent LLM judgment.
+                        let j = &o.propagated_judgments[&c.id];
+                        (
+                            Tier::try_from(j.tier).unwrap_or(Tier::Current),
+                            TierSource::LlmPropagated,
+                            format!("{} (shared with its folder's cluster — one judgment covers the group.)", j.summary),
+                            j.reasoning.clone(),
+                            j.confidence,
+                            Some(config.model.clone()),
+                        )
+                    }
                     (Band::Middle, _) => {
                         fallback_count += 1;
                         (
@@ -659,6 +680,12 @@ pub async fn run_scan(
                 message: "Snagged — ran out of river: the per-scan cost cap was hit; remaining items fell back to heuristic tiers.".into(),
             });
         }
+        if o.cancelled {
+            warns.push(ReportWarning {
+                kind: "stopped_early".into(),
+                message: "You pulled the scan ashore — it stopped early. Everything judged so far is in this report; unjudged items use heuristic tiers (marked as fallback).".into(),
+            });
+        }
         if fallback_count > 0 {
             warns.push(ReportWarning {
                 kind: "llm_failures".into(),
@@ -687,6 +714,7 @@ pub async fn run_scan(
             model: if config.stage2 { Some(config.model.clone()) } else { None },
             llm_cost_usd: outcome.as_ref().map(|o| o.total_cost_usd).unwrap_or(0.0),
             cost_cap_hit: outcome.as_ref().map(|o| o.cost_cap_hit).unwrap_or(false),
+            stopped_early: outcome.as_ref().map(|o| o.cancelled).unwrap_or(false),
             counters: counters.snapshot(),
             entries,
             warnings: warns,

@@ -8,7 +8,7 @@ const ago = (days: number) => new Date(Date.now() - days * day).toISOString();
 
 export const MOCK_REPORT: Report = {
   groups: [
-    { category: "low", count: 13, bytes: 24_184_884_224 },
+    { category: "low", count: 14, bytes: 24_184_884_224 },
     { category: "medium", count: 5, bytes: 11_272_233_984 },
     { category: "high", count: 5, bytes: 4_829_634_560 },
   ],
@@ -285,6 +285,32 @@ export const MOCK_REPORT: Report = {
       reasoning:
         "The module cache holds verified source of every dependency version you've built against. `go clean -modcache` clears it safely, but any subsequent build re-downloads and re-verifies everything. If Go work has paused for four months, this is prime space; if it resumes, it's a tax.",
       confidence: 0.9,
+      llm_model: "anthropic/claude-haiku-class",
+      privacy_tier_used: "standard",
+    },
+    {
+      candidate: {
+        id: "c024",
+        path: "/Users/you/.npm/_logs",
+        kind: "folder",
+        size_bytes: 46_891_520,
+        kind_stats: { children: 2, files: 312, cache_like_ratio: 0.89, truncated: false },
+        last_used_date: ago(96),
+        last_used_from_spotlight: true,
+        modified_date: ago(96),
+        orphan_status: "active",
+        scope_category: "low",
+        score: 69.8,
+        score_components: { size: 8, age: 14, cache_loc: 15, orphan: 0, depth: 2, file_type: 10, child_count: 1.8 },
+        band: "middle",
+      },
+      tier: 1,
+      tier_source: "llm_propagated",
+      summary:
+        "npm's debug logs, same parent folder as its download cache — one judgment covers the group.",
+      reasoning:
+        "This folder shares _cacache's parent, orphan status, and cache-like profile, so the river's verdict for the npm cache applies here too: pure scratch output, regenerated on every run. It was never judged separately.",
+      confidence: 0.96,
       llm_model: "anthropic/claude-haiku-class",
       privacy_tier_used: "standard",
     },
@@ -603,9 +629,9 @@ export const MOCK_NOTICES: Record<string, string[]> = {
   ],
   scoring: ["weights: size 25 · age 25 · cache 15 · orphan 15 · depth 5 · type 10 · children 5"],
   reasoning: [
-    "traveling to the river — 31 candidates in 2 batches",
-    "batch 1/2 — 16 candidates · zdr: true",
-    "batch 2/2 — 15 candidates · zdr: true",
+    "traveling to the river — 31 candidates in 3 batches",
+    "14 representative items stand in for 31 — their siblings share each verdict",
+    "batch 1/3 — 10 representatives · zdr: true",
   ],
   assembling: ["grouping 23 findings by category"],
 };
@@ -641,9 +667,47 @@ export function mockScanEvents(cfg: ScanConfig, fail: boolean): Array<[number, S
   ];
   if (cfg.stage2) {
     script.push(
-      [11_300, { type: "notice", message: MOCK_NOTICES.reasoning[0] }],
-      [12_400, { type: "notice", message: MOCK_NOTICES.reasoning[1] }],
-      [14_200, { type: "notice", message: MOCK_NOTICES.reasoning[2] }],
+      [11_200, { type: "notice", message: MOCK_NOTICES.reasoning[0] }],
+      // Live Stage 2: batch signals + progress with a knowable denominator.
+      [11_400, { type: "batch_started", index: 1, total_batches: 3 }],
+      [12_100, { type: "batch_started", index: 2, total_batches: 3 }],
+      [
+        12_300,
+        {
+          type: "reasoning_progress",
+          judged: 12,
+          total: 31,
+          cost_usd: 0.0041,
+          prompt_tokens: 3_120,
+          completion_tokens: 640,
+        },
+      ],
+      [12_600, { type: "batch_finished", index: 1, total_batches: 3 }],
+      [12_900, { type: "batch_started", index: 3, total_batches: 3 }],
+      [
+        13_400,
+        {
+          type: "reasoning_progress",
+          judged: 24,
+          total: 31,
+          cost_usd: 0.0077,
+          prompt_tokens: 6_240,
+          completion_tokens: 1_280,
+        },
+      ],
+      [13_900, { type: "batch_finished", index: 2, total_batches: 3 }],
+      [
+        14_400,
+        {
+          type: "reasoning_progress",
+          judged: 31,
+          total: 31,
+          cost_usd: 0.0104,
+          prompt_tokens: 9_360,
+          completion_tokens: 1_920,
+        },
+      ],
+      [14_700, { type: "batch_finished", index: 3, total_batches: 3 }],
     );
   } else {
     script.push([

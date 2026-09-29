@@ -115,6 +115,19 @@
       null,
   );
 
+  /* ZDR posture: OpenRouter's catalog doesn't expose zero-data-retention
+     flags per model, and most models are NOT ZDR (fast/free ones almost
+     never are). So when the user hasn't opted into non-ZDR routing, the
+     selected model may simply fail to route — and when they have, the
+     consequence must be visible right here, not buried in the danger
+     zone's fine print. Never claim a model *is* ZDR. */
+  const zdrNote = $derived.by(() => {
+    if (tune.allowNonZdr) {
+      return "This model may be served by providers that keep your requests — that's what \"allow non-ZDR\" means. Only what your privacy tier lets travel can reach them (paths and names at Standard).";
+    }
+    return "Requests for this model are routed only to providers that never keep your prompts (ZDR-only). If OpenRouter can't serve it under that policy, the river crossing fails — most free and fast models are not ZDR, and using them requires the danger-zone opt-in below.";
+  });
+
   function fmtPrice(perToken?: string): string | null {
     const n = parseFloat(perToken ?? "");
     if (!isFinite(n) || n < 0) return null; // "-1" = dynamic pricing
@@ -302,6 +315,7 @@
           </span>
         {/if}
       </div>
+      <p class="hint zdr-note" class:zdr-warn={tune.allowNonZdr}>{zdrNote}</p>
 
       <input
         id="dw-modelq"
@@ -579,6 +593,19 @@
   .m-meta {
     font-size: 12.5px;
     color: var(--ink-faint);
+  }
+
+  .zdr-note {
+    margin-top: 8px;
+    padding: 10px 14px;
+    border: 1px solid var(--hairline-soft);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  .zdr-note.zdr-warn {
+    border-color: rgba(168, 85, 47, 0.4);
+    color: var(--warn);
   }
 
   .models {

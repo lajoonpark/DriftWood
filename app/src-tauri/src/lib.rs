@@ -45,30 +45,92 @@ fn reveal_path(path: String) {
     let _ = std::process::Command::new("open").arg("-R").arg(&path).status();
 }
 
-/// Reveal many paths in Finder (`open -R` with all of them). Paths are
-/// grouped by parent directory so Finder opens one window per folder with
-/// every child preselected — the user then selects all and Cmd+Deletes.
-/// DriftWood itself never deletes (trust model).
+/// What a bulk reveal actually did, so the frontend can tell the user the
+/// truth about windows opened and items left out.
+#[derive(Debug, serde::Serialize)]
+struct RevealSummary {
+    /// Finder windows that were opened (one per parent directory).
+    windows: usize,
+    /// Items preselected across those windows.
+    items: usize,
+    /// Parent directories left out by the window cap.
+    skipped_groups: usize,
+    /// Items in those left-out directories.
+    skipped_items: usize,
+}
+
+/// Reveal many paths in Finder. Grouped by parent directory (one window
+/// per folder, every child preselected so the user selects all and
+/// Cmd+Deletes themselves — DriftWood never deletes), capped at a handful
+/// of windows with the largest groups first, and performed with ONE `open`
+/// invocation. The user is told what opened and what was left out.
 #[tauri::command]
-fn reveal_paths(paths: Vec<String>) {
+fn reveal_paths(paths: Vec<String>) -> Result<RevealSummary, String> {
     use std::collections::BTreeMap;
+
+    /// Reasonable ceiling: a mass reveal must never blanket the screen in
+    /// Finder windows; overflow groups are surfaced, not silently dropped.
+    const MAX_WINDOWS: usize = 6;
+
     let mut groups: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    let mut total_items = 0usize;
     for p in &paths {
         if let Some(parent) = std::path::Path::new(p).parent() {
             groups
                 .entry(parent.to_path_buf())
                 .or_default()
                 .push(p.clone());
+            total_items += 1;
         }
     }
-    for (_, group) in groups {
-        let mut cmd = std::process::Command::new("open");
-        cmd.arg("-R");
-        for p in group {
+    if groups.is_empty() {
+        return Ok(RevealSummary {
+            windows: 0,
+            items: 0,
+            skipped_groups: 0,
+            skipped_items: 0,
+        });
+    }
+
+    // Largest groups first (overflow is predictable, not arbitrary),
+    // tie-broken by path so the order is stable.
+    let mut ordered: Vec<&Vec<String>> = groups.values().collect();
+    ordered.sort_by(|a, b| {
+        b.len()
+            .cmp(&a.len())
+            .then_with(|| a.first().cmp(&b.first()))
+    });
+
+    let picked: Vec<&Vec<String>> = ordered.iter().take(MAX_WINDOWS).copied().collect();
+    let skipped_groups = ordered.len() - picked.len();
+    let skipped_items = ordered
+        .iter()
+        .skip(MAX_WINDOWS)
+        .map(|g| g.len())
+        .sum::<usize>();
+
+    // ONE `open` invocation for the whole action — a mass reveal must not
+    // spawn a process per folder.
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg("-R");
+    for group in &picked {
+        for p in group.iter() {
             cmd.arg(p);
         }
-        let _ = cmd.status();
     }
+    let status = cmd
+        .status()
+        .map_err(|e| format!("could not open Finder: {e}"))?;
+    if !status.success() {
+        return Err("Finder did not accept the reveal".into());
+    }
+
+    Ok(RevealSummary {
+        windows: picked.len(),
+        items: total_items - skipped_items,
+        skipped_groups,
+        skipped_items,
+    })
 }
 
 /// Scan options as sent by the frontend. Anything the shell does not send
@@ -105,7 +167,9 @@ impl EventSink for TauriSink {
 }
 
 /// Run a scan. Emits progress on `scan-event`; resolves to the report in
-/// the shape the frontend expects, or "cancelled" when the user aborted.
+/// the shape the frontend expects. A cancel during Stage 2 resolves to a
+/// partial report (`stopped_early`, fallback-labeled remainder) instead of
+/// discarding the work; only early-phase cancels resolve to "cancelled".
 #[tauri::command]
 async fn start_scan(
     app: tauri::AppHandle,
@@ -156,13 +220,15 @@ async fn start_scan(
             let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
             Ok(report_to_frontend(value))
         }
+        // Early-phase cancel (before anything worth reporting exists).
         Err(DriftError::Cancelled) => Err("cancelled".into()),
         Err(e) => Err(e.to_string()),
     }
 }
 
-/// Cancel the running scan (prompt cancellation — checked between phases
-/// and LLM batches, never mid-batch).
+/// Cancel the running scan. Stage 2 checks this inside the streaming loop,
+/// so an in-flight request is aborted immediately; the scan then resolves
+/// to a partial report rather than nothing.
 #[tauri::command]
 fn cancel_scan(state: tauri::State<'_, ScanState>) {
     if let Some(handle) = state.handle.lock().expect("scan state poisoned").as_ref() {

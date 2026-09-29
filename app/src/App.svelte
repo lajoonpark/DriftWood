@@ -9,6 +9,7 @@
   import Privacy from "./screens/Privacy.svelte";
   import ScanScreen from "./screens/Scan.svelte";
   import ReportScreen from "./screens/Report.svelte";
+  import BrowserScreen from "./screens/Browser.svelte";
   import SettingsScreen from "./screens/Settings.svelte";
   import { onboarding, saveOnboarding, scan, toasts } from "./lib/stores";
   import type { View } from "./lib/stores";
@@ -89,6 +90,9 @@
           <button class="nav-link" class:cur={view === "report"} onclick={() => go("report")}>
             Report
           </button>
+          <button class="nav-link" class:cur={view === "browser"} onclick={() => go("browser")}>
+            The Finder
+          </button>
         {/if}
         <button class="nav-link" class:cur={view === "settings"} onclick={() => go("settings")}>
           Settings
@@ -111,7 +115,9 @@
         {:else if view === "scan"}
           <ScanScreen onDone={() => go("report")} />
         {:else if view === "report"}
-          <ReportScreen onRescan={() => go("scan")} />
+          <ReportScreen onRescan={() => go("scan")} onBrowser={() => go("browser")} />
+        {:else if view === "browser"}
+          <BrowserScreen onBack={() => go("report")} />
         {:else if view === "settings"}
           <SettingsScreen onBack={() => go(onboarded ? "scan" : "welcome")} />
         {/if}

@@ -13,6 +13,9 @@
 
   let error = $state<string | null>(null);
   let finishing = $state(false);
+  /** Acknowledge "Pull ashore" immediately — the button must never look
+   *  dead while a batch finishes; the report then arrives as partial. */
+  let stoppingAck = $state(false);
 
   const s = $derived($onboarding);
 
@@ -42,9 +45,31 @@
   );
 
   const st = $derived($scan);
+  const rs = $derived(st.reasoning);
+
+  /* Stage 2 is the only phase with a knowable denominator, so these are
+   * real numbers — percentage, ETA, speed — and shown only here. */
+  const stage2 = $derived.by(() => {
+    if (!rs || rs.totalBatches === 0) return null;
+    const pct = rs.total > 0 ? rs.judged / rs.total : 0;
+    const remaining = Math.max(0, rs.totalBatches - rs.batchesFinished);
+    const etaMs = rs.batchEmaMs > 0 ? remaining * rs.batchEmaMs : null;
+    return { rs, pct, remaining, etaMs };
+  });
+
+  const cap = $derived($appSettings.costCap);
+  const capHeadroom = $derived(Math.max(0, cap - (rs?.costUsd ?? 0)));
+
+  function fmtEta(ms: number): string {
+    const totalSec = Math.max(1, Math.round(ms / 1000));
+    if (totalSec < 60) return `~${totalSec}s remaining`;
+    const m = Math.floor(totalSec / 60);
+    return `~${m}m ${String(totalSec % 60).padStart(2, "0")}s remaining`;
+  }
 
   async function start() {
     error = null;
+    stoppingAck = false;
     scan.reset();
     scan.setRunning(true);
     try {
@@ -56,6 +81,8 @@
       scan.setRunning(false);
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "cancelled") {
+        // Early-phase cancel only — nothing worth reporting existed yet.
+        // A Stage 2 cancel arrives here as a partial report instead.
         toast("The scan drifted back ashore.");
       } else {
         error = msg;
@@ -64,6 +91,9 @@
   }
 
   function cancel() {
+    if (stoppingAck || st.stopping) return;
+    stoppingAck = true;
+    scan.setStopping();
     bridge.cancelScan();
   }
 
@@ -109,10 +139,45 @@
           <span class="c-label kicker">Recoverable so far</span>
           <span class="c-value big"><Counter value={st.recoverableBytes} fmt={(v) => formatBytes(v)} duration={1_200} /></span>
         </div>
+        {#if rs && rs.speed > 0}
+          <div class="counter">
+            <span class="c-label kicker">Speed</span>
+            <span class="c-value">{Math.round(rs.speed)} items/sec</span>
+          </div>
+        {/if}
       </div>
 
+      {#if stage2}
+        <!-- Stage 2: the one honest progress bar — real percentage, real
+             ETA, live cost against its visible ceiling. -->
+        <div class="stage2" in:fade={{ duration: 400 }}>
+          <div class="bar" role="progressbar" aria-valuenow={Math.round(stage2.pct * 100)}>
+            <div class="fill" style={`width:${(stage2.pct * 100).toFixed(1)}%`}></div>
+          </div>
+          <div class="s2-meta">
+            <span class="num">{formatCount(stage2.rs.judged)} of {formatCount(stage2.rs.total)} items judged</span>
+            <span class="num" title="EMA of settled batch pace">
+              {#if stage2.etaMs !== null}{fmtEta(stage2.etaMs)}{:else}settling…{/if}
+            </span>
+          </div>
+          <div class="s2-cost">
+            <span class="num">${stage2.rs.costUsd.toFixed(4)} spent</span>
+            <span class="num cap-line">
+              of ${cap.toFixed(2)} cap · ${capHeadroom.toFixed(2)} headroom
+            </span>
+          </div>
+        </div>
+      {/if}
+
       {#if st.running && !finishing}
-        <button class="btn-quiet cancel" onclick={cancel}>Pull ashore</button>
+        <button
+          class="btn-quiet cancel"
+          onclick={cancel}
+          disabled={st.stopping}
+          title={st.stopping ? "In-flight work is being stopped — the partial report is on its way." : "Stops the scan and keeps everything judged so far."}
+        >
+          {st.stopping ? "Pulling ashore…" : "Pull ashore"}
+        </button>
       {/if}
     </div>
   {:else}
@@ -280,6 +345,49 @@
     position: absolute;
     bottom: 4.5vh;
     font-size: 13px;
+  }
+
+  .cancel:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+
+  /* ---------- Stage 2: honest progress ---------- */
+
+  .stage2 {
+    width: min(520px, 72vw);
+    margin-top: 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .bar {
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.42);
+    box-shadow: inset 0 0 0 1px var(--hairline);
+    overflow: hidden;
+  }
+
+  .fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--river) 0%, var(--river-deep) 100%);
+    transition: width 0.6s var(--ease-out);
+  }
+
+  .s2-meta,
+  .s2-cost {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+
+  .cap-line {
+    color: var(--ink-faint);
   }
 
   /* ---------- snagged ---------- */

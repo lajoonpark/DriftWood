@@ -71,6 +71,11 @@ pub enum TierSource {
     Rule,
     /// Assigned by the LLM in Stage 2.
     Llm,
+    /// The LLM judged a cluster representative; this item shares its
+    /// parent directory, orphan status, and cache-likeness bucket, so the
+    /// judgment was propagated. Never presented as an independent LLM
+    /// judgment — one shared verdict, honestly labeled.
+    LlmPropagated,
     /// LLM failed / cost cap hit; heuristic band label used instead.
     Fallback,
     /// Hard never-flag list forced this to tier 4 minimum.

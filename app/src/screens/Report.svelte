@@ -4,8 +4,7 @@
   import Stamp from "../components/Stamp.svelte";
   import { reveal } from "../lib/motion";
   import { formatBytes, formatCount } from "../lib/format";
-  import { scan, toast } from "../lib/stores";
-  import { bridge } from "../lib/bridge";
+  import { scan } from "../lib/stores";
   import {
     SCOPE_LABELS,
     TIER_NAMES,
@@ -14,9 +13,10 @@
     type Tier,
   } from "../lib/types";
 
-  let { onRescan }: { onRescan: () => void } = $props();
+  let { onRescan, onBrowser }: { onRescan: () => void; onBrowser: () => void } = $props();
 
   const report = $derived($scan.report as Report);
+  const stoppedEarly = $derived(Boolean(report.stopped_early));
 
   /* Effective tiers: overrides win over the report's assignment. */
   let overrides = $state<Record<string, Tier>>({});
@@ -83,21 +83,6 @@
     overrides = { ...overrides, [id]: tier };
   }
 
-  /* Bulk triage: every entry the report currently stamps Driftwood
-     (tier 1), honoring user overrides. Revealing preselects them in
-     Finder so the user deletes — DriftWood never does. */
-  const driftwoodPaths = $derived(
-    report.entries
-      .filter((e) => effTier(e.candidate.id, e.tier) === 1)
-      .map((e) => e.candidate.path),
-  );
-
-  function revealAllDriftwood() {
-    if (driftwoodPaths.length === 0) return;
-    bridge.revealAll(driftwoodPaths);
-    toast(`Revealed ${formatCount(driftwoodPaths.length)} items in Finder.`);
-  }
-
   function rescan() {
     onRescan();
   }
@@ -135,6 +120,16 @@
           <span class="mid num">{formatCount(report.entries.length)}</span>
         </div>
       </div>
+
+      {#if stoppedEarly}
+        <div class="stopped-note">
+          <p class="serif-lead">
+            <strong>Pulled ashore.</strong> This report is partial — the scan stopped early at
+            your request. Everything the river had judged so far is here; the rest is honestly
+            labeled as heuristic estimates. Search the river again when you're ready.
+          </p>
+        </div>
+      {/if}
 
       {#if report.warnings?.length}
         <div class="warnings rv" use:reveal style="--rv-delay:460ms">
@@ -177,13 +172,13 @@
 
     <footer class="rv" use:reveal>
       <button class="btn btn-primary" onclick={rescan}>Search the river again</button>
-      {#if driftwoodPaths.length > 0}
+      {#if report.entries.length > 0}
         <button
           class="btn-quiet"
-          onclick={revealAllDriftwood}
-          title="Opens one Finder window per folder, every Driftwood item preselected — select all and press Cmd+Delete yourself."
+          onclick={onBrowser}
+          title="Browse everything the river found by tier and personal risk, select, and hand it to Finder."
         >
-          Reveal {formatCount(driftwoodPaths.length)} Driftwood in Finder
+          Open the Finder
         </button>
       {/if}
       <p class="foot-note">DriftWood deleted nothing. It never does.</p>
@@ -271,6 +266,26 @@
 
   .filter-note strong {
     font-weight: 560;
+  }
+
+  .stopped-note {
+    margin-top: 14px;
+    padding: 14px 18px;
+    border: 1px solid rgba(168, 85, 47, 0.35);
+    border-left: 3px solid var(--warn);
+    border-radius: 12px;
+    background: rgba(168, 85, 47, 0.06);
+  }
+
+  .stopped-note .serif-lead {
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+
+  .stopped-note strong {
+    color: var(--warn);
+    font-weight: 600;
   }
 
   .warnings p {

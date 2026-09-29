@@ -57,6 +57,11 @@ pub struct Report {
     pub model: Option<String>,
     pub llm_cost_usd: f64,
     pub cost_cap_hit: bool,
+    /// The user pulled the scan ashore mid-crossing: the report is partial
+    /// and every unjudged item is honestly labeled `fallback`. Distinct
+    /// from `cost_cap_hit` — the two are different reasons for stopping.
+    #[serde(default)]
+    pub stopped_early: bool,
     pub counters: Counters,
     pub groups: Vec<GroupSummary>,
     pub entries: Vec<ReportEntry>,
@@ -114,6 +119,7 @@ pub struct AssembleInput {
     pub model: Option<String>,
     pub llm_cost_usd: f64,
     pub cost_cap_hit: bool,
+    pub stopped_early: bool,
     pub counters: Counters,
     pub entries: Vec<ReportEntry>,
     pub warnings: Vec<ReportWarning>,
@@ -147,6 +153,7 @@ pub fn assemble(input: AssembleInput) -> Report {
         model: input.model,
         llm_cost_usd: input.llm_cost_usd,
         cost_cap_hit: input.cost_cap_hit,
+        stopped_early: input.stopped_early,
         counters: input.counters,
         groups,
         entries: input.entries,
@@ -252,6 +259,7 @@ mod tests {
             model: None,
             llm_cost_usd: 0.0,
             cost_cap_hit: false,
+            stopped_early: false,
             counters: Counters::default(),
             entries: vec![
                 entry("/a", ScopeCategory::High, 500, 50.0),

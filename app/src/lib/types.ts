@@ -8,6 +8,7 @@ export type TierSource =
   | "auto_low"
   | "rule"
   | "llm"
+  | "llm_propagated"
   | "fallback"
   | "never_flag";
 
@@ -126,6 +127,17 @@ export interface Report {
   warnings?: string[];
   /** Set when the cost cap cut Stage 2 short ("Snagged — ran out of river"). */
   cost_cap?: boolean;
+  /** Set when the user pulled the scan ashore mid-crossing. Distinct from
+   *  a cost-cap stop; the report is partial, unjudged items are fallback. */
+  stopped_early?: boolean;
+}
+
+/** What a bulk Finder hand-off actually did (from reveal_paths). */
+export interface RevealSummary {
+  windows: number;
+  items: number;
+  skipped_groups: number;
+  skipped_items: number;
 }
 
 export interface ScanConfig {
@@ -147,6 +159,20 @@ export type ScanEvent =
   | { type: "bytes_searched"; total: number }
   | { type: "candidates_found"; total: number }
   | { type: "recoverable_bytes"; total: number }
+  /** Stage 2 progress: judged/total are real item counts (cluster
+   *  propagation included); cost/tokens are actual spend so far — only
+   *  finalized when a streamed call ends. Reasoning is the only phase
+   *  with a knowable denominator; never render a percentage elsewhere. */
+  | {
+      type: "reasoning_progress";
+      judged: number;
+      total: number;
+      cost_usd: number;
+      prompt_tokens: number;
+      completion_tokens: number;
+    }
+  | { type: "batch_started"; index: number; total_batches: number }
+  | { type: "batch_finished"; index: number; total_batches: number }
   | { type: "notice"; message: string }
   | { type: "warn"; message: string }
   | { type: "error"; message: string };

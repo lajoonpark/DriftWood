@@ -170,6 +170,18 @@ impl EventSink for CliSink {
             ScanEvent::RecoverableBytes { total } => {
                 eprintln!("recoverable: {}", human_bytes(total));
             }
+            ScanEvent::ReasoningProgress {
+                judged,
+                total,
+                cost_usd,
+                ..
+            } => {
+                eprint!(
+                    "\r reasoned: {judged}/{total} · {} so far",
+                    driftwood_core::reason::format_cost(cost_usd)
+                );
+            }
+            ScanEvent::BatchStarted { .. } | ScanEvent::BatchFinished { .. } => {}
             ScanEvent::Notice { message } => eprintln!("    · {message}"),
             ScanEvent::Warn { message } => eprintln!("    ! {message}"),
             ScanEvent::Error { message } => eprintln!("    x {message}"),
