@@ -25,6 +25,21 @@ Output: respond with ONLY a JSON array, one object per candidate, in the same or
 [{"id": "<candidate id>", "tier": <1|2|3|4>, "confidence": <0..1>, "summary": "<one sentence: what it is / why it exists>", "reasoning": "<full rationale>"}]
 Never invent ids. Never output paths in the response."#;
 
+/// Prepended to [`SYSTEM_PROMPT`] for on-demand adjudication only. Without
+/// this the model tends to ratify the existing stamp; the user asked for a
+/// second opinion precisely because they doubt it, so the model must argue
+/// against the card.
+pub const ADJUDICATION_INSTRUCTION: &str = r#"
+This is an ADJUDICATION: the user is re-examining ONE candidate that DriftWood already stamped, and has asked for a second opinion. Argue against the card:
+- First state the strongest case FOR KEEPING this item (a higher, safer tier).
+- Then decide the tier on the evidence. If the strongest counterargument to the current stamp is strong, RAISE the tier.
+- Never keep the current tier merely because the card says so. If you agree with it, say exactly why the stamp survives scrutiny — a conforming answer with no reasoning is a failed adjudication."#;
+
+/// The system prompt for a single-candidate adjudication.
+pub fn adjudication_system_prompt() -> String {
+    format!("{SYSTEM_PROMPT}\n{ADJUDICATION_INSTRUCTION}")
+}
+
 /// Build the user message for one batch of payloads.
 /// `few_shot`: optional past corrections injected as examples — privacy-
 /// gated by the caller (Minimal = never).

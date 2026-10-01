@@ -43,6 +43,11 @@ pub struct ScanRequest {
     /// When true, skip the LLM stage entirely (heuristic tiers only).
     #[schemars(description = "Skip LLM stage (heuristic tiers only)")]
     pub dry_run: Option<bool>,
+    /// Deep read: bands are advisory and every surviving candidate is
+    /// argued (implies LLM on). Costs far more than the default; cluster
+    /// dedup is what keeps it affordable.
+    #[schemars(description = "Deep read mode: argue every candidate (expensive)")]
+    pub deep_read: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -184,12 +189,19 @@ impl DriftWoodServer {
         let scope = req.scope.unwrap_or_else(|| "low".into());
         let privacy = req.privacy_tier.unwrap_or_else(|| "standard".into());
         let dry_run = req.dry_run.unwrap_or(false);
+        let deep_read = req.deep_read.unwrap_or(false);
 
         let sink = Arc::new(MemorySink::default());
         let config = ScanConfig {
             scopes: parse_scope(&scope),
             privacy_tier: parse_privacy(&privacy),
-            stage2: !dry_run,
+            mode: if dry_run {
+                driftwood_core::ScanMode::Express
+            } else if deep_read {
+                driftwood_core::ScanMode::DeepRead
+            } else {
+                driftwood_core::ScanMode::Standard
+            },
             model: driftwood_core::default_model().to_string(),
             api_key: std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.is_empty()),
             allow_non_zdr: false,

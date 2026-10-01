@@ -4,14 +4,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 
 /// Probe whether Spotlight indexing is enabled for the root volume.
 /// When false, the scanner degrades to walkdir + dates and the report is
 /// labeled "the river ran murky" (edge case §4.1).
-pub async fn spotlight_available() -> bool {
-    let out = run("mdutil", &["-s", "/"]).await;
+pub async fn spotlight_available(timeout: Duration) -> bool {
+    let out = run("mdutil", &["-s", "/"], timeout).await;
     match out {
         Some(s) => s.to_lowercase().contains("indexing enabled"),
         None => false,
@@ -24,21 +25,27 @@ pub fn parse_mdutil_output(output: &str) -> bool {
 }
 
 /// Query `mdfind -onlyin <root>` for paths used within the recency window.
-/// Returns the raw path set (pure parsing below).
-pub async fn recently_used_under(root: &Path, recency_days: i64) -> HashSet<PathBuf> {
+/// `None` means the query never answered (timeout/failure) — the caller
+/// must treat that as *incomplete recency data*, distinct from an empty
+/// result (nothing recent), and warn accordingly.
+pub async fn recently_used_under(
+    root: &Path,
+    recency_days: i64,
+    timeout: Duration,
+) -> Option<HashSet<PathBuf>> {
     let query = format!("kMDItemLastUsedDate >= $time.today(-{recency_days}d)");
     let out = run(
         "mdfind",
         &["-onlyin", &root.to_string_lossy(), &query],
+        timeout,
     )
-    .await;
-    match out {
-        Some(s) => parse_mdfind_output(&s)
+    .await?;
+    Some(
+        parse_mdfind_output(&out)
             .into_iter()
             .map(PathBuf::from)
             .collect(),
-        None => HashSet::new(),
-    }
+    )
 }
 
 /// Parse `mdfind` output: one absolute path per line.
@@ -54,7 +61,11 @@ pub fn parse_mdfind_output(output: &str) -> Vec<String> {
 /// Batch-query `mdls -name kMDItemLastUsedDate <paths...>`; returns a map
 /// from path → Option<date>. `None` values mean Spotlight had no date for
 /// that path — which never blocks candidacy (plan §3.1.2).
-pub async fn query_last_used(paths: &[PathBuf], batch_size: usize) -> HashMap<PathBuf, Option<DateTime<Utc>>> {
+pub async fn query_last_used(
+    paths: &[PathBuf],
+    batch_size: usize,
+    timeout: Duration,
+) -> HashMap<PathBuf, Option<DateTime<Utc>>> {
     let mut out = HashMap::with_capacity(paths.len());
     for chunk in paths.chunks(batch_size.max(1)) {
         let mut args: Vec<String> = Vec::with_capacity(chunk.len() * 2 + chunk.len());
@@ -65,7 +76,12 @@ pub async fn query_last_used(paths: &[PathBuf], batch_size: usize) -> HashMap<Pa
         for p in chunk {
             args.push(p.to_string_lossy().into_owned());
         }
-        let output = run("mdls", &args.iter().map(String::as_str).collect::<Vec<_>>()).await;
+        let output = run(
+            "mdls",
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            timeout,
+        )
+        .await;
         if let Some(text) = output {
             out.extend(parse_mdls_output(&text));
         }
@@ -135,7 +151,11 @@ pub fn parse_mdls_date(value: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-async fn run(program: &str, args: &[&str]) -> Option<String> {
+/// Run one Spotlight helper, bounded by `timeout`. `mdfind`/`mdls` on an
+/// unresponsive mount block forever without it — a hang reads as "no data"
+/// (the safe direction: missing recency never blocks candidacy), and
+/// `kill_on_drop` reaps the dropped child.
+async fn run(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
     let child = tokio::process::Command::new(program)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -143,11 +163,18 @@ async fn run(program: &str, args: &[&str]) -> Option<String> {
         .kill_on_drop(true)
         .spawn()
         .ok()?;
-    let out = child.wait_with_output().await.ok()?;
-    if !out.status.success() {
-        return None;
+    let waited = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    match waited {
+        Ok(Ok(out)) => {
+            if !out.status.success() {
+                return None;
+            }
+            Some(String::from_utf8_lossy(&out.stdout).into_owned())
+        }
+        // Timeout or wait failure: no data. Dropping the child kills it
+        // (kill_on_drop), so a wedged mdfind does not linger.
+        _ => None,
     }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Compute an age reference date: Spotlight last-used, else modified, else
@@ -215,5 +242,20 @@ kMDItemLastUsedDate = null
         let m = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
         assert_eq!(age_reference(Some(a), Some(m), None), Some(a));
         assert_eq!(age_reference(None, Some(m), None), Some(m));
+    }
+
+    /// A helper process that never answers in time reads as no data — the
+    /// bounded-riverbed contract for Spotlight subprocesses.
+    #[tokio::test]
+    async fn run_times_out_a_hung_helper() {
+        // `sleep` is POSIX; 5s >> the 50ms budget.
+        let out = run("sleep", &["5"], Duration::from_millis(50)).await;
+        assert!(out.is_none(), "a hung helper must time out, not block");
+    }
+
+    #[tokio::test]
+    async fn run_returns_output_within_budget() {
+        let out = run("echo", &["hello"], Duration::from_secs(5)).await;
+        assert_eq!(out.as_deref(), Some("hello\n"));
     }
 }

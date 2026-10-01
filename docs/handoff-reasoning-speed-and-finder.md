@@ -206,6 +206,19 @@ Two defects to fix together:
   never silently open 40 windows.
 - Never invoke `open` more than once per reveal action; batch it.
 
+> **Superseded (see `docs/handoff-easy-deletion-handoff.md`).** The single-window/capped design
+> above was implemented first (one `open -R` invocation, six-window cap) and turned out to fail
+> the product goal: `open -R` is a *reveal* verb, not a *select-many* verb, it returns before
+> Finder has finished opening windows, and every window still meant one hand-walked ⌘Delete
+> round-trip. The hand-off now groups the selection into **container folders** (distinct parents,
+> descendants folded into ancestors, guarded rollup into scanned roots), opens **one Finder
+> window per container** via AppleScript with the exact findings preselected, and **reads the
+> selection count back from Finder** so the UI reports what Finder actually has selected — not
+> what we asked for. There is no window cap to overflow: skipped paths are reported individually
+> with reasons, and the pre-commit plan (`plan_handoff`) shows the containers, the
+> findings-versus-total ratio, and taint warnings before the user commits. The single-item
+> `reveal_path` (entry cards) still uses `open -R` and is unaffected.
+
 ### 6. In-app Finder (read-only browser over the report)
 
 Build a new screen (suggest `app/src/screens/Browser.svelte`, wired through `App.svelte`'s view
@@ -226,6 +239,20 @@ Requirements:
 - **Handoff:** a "Show these in Finder" action that calls the (fixed) `revealAll` with the selected
   paths. The user then presses Cmd+Delete themselves. Copy must make the hand-off explicit and
   calm — this is a handoff, not a deletion.
+
+> **Superseded (see `docs/handoff-easy-deletion-handoff.md`).** The hand-off is now
+> container-based: below the tier sections, the browser shows a pre-commit **hand-off plan** —
+> one row per container folder with `N items in this folder · M are driftwood · X GB of
+> findings`, the folder entry count rendered as "total unknown" when it cannot be counted
+> cheaply, a visible warning on low findings-to-total ratios, and a distinct taint warning for
+> containers aggregating Source-tier or high-personal-risk findings. Each container has its own
+> deliberate hand-off action, and the bulk action states exactly how many folders (windows) it
+> will open and how many findings that covers. Completion reports Finder's *verified* selection
+> counts and every skipped path with its reason — no silent partial success. macOS's Automation
+> consent for Finder control is handled explicitly: `-1743` refusals surface as a calm
+> explanation with a deep link to System Settings → Privacy & Security → Automation, both here
+> and on the trust screen. The per-leaf browsing (tier sections, risk filter, windowed rows) is
+> unchanged.
 - **Safety framing:** `Source` (tier 4) and high-personal-risk items should be visually distinct
   and carry the existing blurbs (`TIER_BLURBS`). DriftWood still performs no deletion, so no
   confirmation gate is strictly required, but the UI should not encourage a blanket hand-off of

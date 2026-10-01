@@ -33,10 +33,25 @@ impl InstalledApps {
     }
 }
 
-/// Default never-orphan entries. Data, not code: the memory folder may
+/// System/OS-vendor owner patterns. One shared list with two consumers:
+/// never-orphan detection (this module) and the tier-3 system floor
+/// (`engine.rs`). Keeping it single-source is deliberate — two parallel
+/// lists drift, and the confident-wrong-answer class comes back.
+///
+/// WHY these entries and not others: the criterion is NOT "installed" and
+/// NOT "big vendor". It is: **the vendor owns the OS or the whole suite,
+/// so this folder may be load-bearing for things outside that one
+/// application** (system services, cross-app shared state). Apple owns
+/// macOS. Microsoft qualifies — Office/Teams/OneDrive share state across
+/// apps. An ordinary App Store app does NOT: its folders only serve
+/// itself, so the LLM is free to judge them.
+pub const SYSTEM_VENDOR_PATTERNS: &[&str] = &["com.apple.*", "com.microsoft.*"];
+
+/// Default never-orphan entries, EXCLUDING the system-vendor patterns
+/// above (those are merged in by [`load_never_orphan_list`], which is the
+/// one place the two lists meet). Data, not code: the memory folder may
 /// extend this via `never-orphan.json` (plan §3.1.4).
 pub const DEFAULT_NEVER_ORPHAN: &[&str] = &[
-    "com.apple.*",
     "group.*",
     "com.apple",
     "apple",
@@ -157,10 +172,18 @@ pub fn fuzzy_match(candidate: &str, name: &str) -> bool {
     false
 }
 
-/// Load never-orphan entries: defaults merged with
-/// `<memory_dir>/never-orphan.json` when present (plain JSON array).
+/// Load the protection list: system-vendor patterns + default never-orphan
+/// entries, merged with `<memory_dir>/never-orphan.json` when present
+/// (plain JSON array). This is the single merge point for the two
+/// consumers — never-orphan detection and the system floor both match
+/// against this list, so a vendor added to the memory-folder file is
+/// respected by both or neither.
 pub fn load_never_orphan_list(memory_dir: &Path) -> Vec<String> {
-    let mut list: Vec<String> = DEFAULT_NEVER_ORPHAN.iter().map(|s| s.to_string()).collect();
+    let mut list: Vec<String> = SYSTEM_VENDOR_PATTERNS
+        .iter()
+        .chain(DEFAULT_NEVER_ORPHAN.iter())
+        .map(|s| s.to_string())
+        .collect();
     let path = memory_dir.join("never-orphan.json");
     if let Ok(text) = std::fs::read_to_string(&path) {
         if let Ok(serde_json::Value::Array(items)) = serde_json::from_str(&text) {
@@ -172,6 +195,16 @@ pub fn load_never_orphan_list(memory_dir: &Path) -> Vec<String> {
         }
     }
     list
+}
+
+/// The pattern (if any) from the protection list that matches this folder
+/// name. Used by the system floor: a match means the folder's owner is on
+/// the system/vendor list, so DriftWood must not auto-label it safe.
+pub fn matching_protected_pattern(normalized_name: &str, never_list: &[String]) -> Option<String> {
+    never_list
+        .iter()
+        .find(|entry| is_never_orphan(normalized_name, std::slice::from_ref(entry)))
+        .cloned()
 }
 
 /// Is this folder name protected by the never-orphan list? Patterns use

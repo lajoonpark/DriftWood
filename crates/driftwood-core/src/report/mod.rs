@@ -11,7 +11,11 @@ use crate::types::{Candidate, ScopeCategory, Tier};
 
 pub use crate::types::ReportEntry;
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// Bumped for the honest-tiers release: `Candidate.auto_high_basis`,
+/// `Report.adjudication_cost_usd`, and the new `TierSource` variants were
+/// added. New fields carry `#[serde(default)]` so older persisted reports
+/// still load.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// A scan run's identity, used for batch-resume persistence.
 pub fn new_scan_id() -> String {
@@ -62,6 +66,13 @@ pub struct Report {
     /// from `cost_cap_hit` — the two are different reasons for stopping.
     #[serde(default)]
     pub stopped_early: bool,
+    /// Cumulative spend of on-demand adjudications made after the scan
+    /// completed. Kept separate from `llm_cost_usd` so the scan total stays
+    /// the scan total, but a report that says "$0.12 spent" while
+    /// adjudications added $0.01 is exactly the dishonesty this field
+    /// prevents: the displayed total must be the sum of both.
+    #[serde(default)]
+    pub adjudication_cost_usd: f64,
     pub counters: Counters,
     pub groups: Vec<GroupSummary>,
     pub entries: Vec<ReportEntry>,
@@ -107,6 +118,18 @@ impl Report {
         let path = crate::paths::reports_dir().join("last-report.json");
         let text = std::fs::read_to_string(path)?;
         Ok(serde_json::from_str(&text)?)
+    }
+
+    /// Record one adjudication's cost against the report and re-write
+    /// `last-report.json` so the displayed spend stays honest. The stamped
+    /// historical copy is left untouched — it is a record of the scan.
+    pub fn record_adjudication_cost(&mut self, cost_usd: f64) -> crate::Result<()> {
+        self.adjudication_cost_usd += cost_usd;
+        let dir = crate::paths::reports_dir();
+        std::fs::create_dir_all(&dir)?;
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(dir.join("last-report.json"), json)?;
+        Ok(())
     }
 }
 
@@ -154,6 +177,7 @@ pub fn assemble(input: AssembleInput) -> Report {
         llm_cost_usd: input.llm_cost_usd,
         cost_cap_hit: input.cost_cap_hit,
         stopped_early: input.stopped_early,
+        adjudication_cost_usd: 0.0,
         counters: input.counters,
         groups,
         entries: input.entries,
@@ -238,6 +262,7 @@ mod tests {
                 score,
                 score_components: ScoreComponents::default(),
                 band: Band::Middle,
+                auto_high_basis: None,
             },
             tier: Tier::Current,
             tier_source: TierSource::Fallback,
@@ -288,5 +313,48 @@ mod tests {
         assert_ne!(a, c);
         assert!(a.starts_with("c-"));
         assert!(!a.contains('/'));
+    }
+
+    /// Previously persisted reports (schema 1) must still load: the new
+    /// fields carry `#[serde(default)]`, and the legacy `auto_high`
+    /// TierSource variant remains deserializable.
+    #[test]
+    fn old_reports_still_load() {
+        let old = r#"{
+            "schema_version": 1,
+            "scan_id": "dw-old",
+            "generated_at": "2025-01-01T00:00:00Z",
+            "spotlight_available": true,
+            "privacy_tier_used": "standard",
+            "model": null,
+            "llm_cost_usd": 0.0,
+            "cost_cap_hit": false,
+            "counters": {"files_searched": 0, "bytes_searched": 0,
+                         "candidates_found": 0, "recoverable_bytes": 0},
+            "groups": [],
+            "entries": [{
+                "candidate": {"id": "c-1", "path": "/x", "kind": "folder",
+                    "size_bytes": 1, "last_used_from_spotlight": false,
+                    "orphan_status": "active", "scope_category": "low",
+                    "score": 10.0, "score_components":
+                        {"size": 0.0, "age": 0.0, "cache_location": 0.0,
+                         "orphan": 0.0, "depth": 0.0, "file_type": 0.0,
+                         "child_count": 0.0},
+                    "band": "high"},
+                "tier": 1,
+                "tier_source": "auto_high",
+                "summary": "old unargued stamp",
+                "reasoning": "",
+                "confidence": 1.0,
+                "privacy_tier_used": "standard"
+            }],
+            "warnings": []
+        }"#;
+        let r: Report = serde_json::from_str(old).unwrap();
+        assert_eq!(r.schema_version, 1);
+        assert_eq!(r.stopped_early, false, "serde default");
+        assert_eq!(r.adjudication_cost_usd, 0.0, "serde default");
+        assert_eq!(r.entries[0].tier_source, TierSource::AutoHigh);
+        assert!(r.entries[0].candidate.auto_high_basis.is_none(), "serde default");
     }
 }

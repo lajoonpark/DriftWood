@@ -301,7 +301,7 @@ pub async fn reason_middle_band(
     let persist = Some(batch_persist_path(scan_id));
     reason_middle_band_with(
         middle, privacy, cfg, model, api_key, enforce_zdr, scan_id, few_shot, sink, cancel,
-        transport, persist,
+        transport, persist, None,
     )
     .await
 }
@@ -332,6 +332,9 @@ pub async fn reason_middle_band_with<T: client::Transport + 'static>(
     cancel: Arc<AtomicBool>,
     transport: Arc<T>,
     persist_path: Option<PathBuf>,
+    // Replacement system prompt (adjudication uses the adversarial
+    // variant). `None` → the standard `prompt::SYSTEM_PROMPT`.
+    system_override: Option<&str>,
 ) -> Result<ReasonOutcome> {
     sink.emit(ScanEvent::Phase {
         phase: Phase::Reasoning,
@@ -462,6 +465,7 @@ pub async fn reason_middle_band_with<T: client::Transport + 'static>(
                 cancel.clone(),
                 batch_no,
                 total_batches,
+                system_override.map(String::from),
             ));
             next_batch += 1;
             inflight += 1;
@@ -601,6 +605,7 @@ async fn run_one_batch<T: client::Transport>(
     cancel: Arc<AtomicBool>,
     batch_no: usize,
     total_batches: usize,
+    system_override: Option<String>,
 ) -> (usize, BatchUnit, Result<(f64, u64, u64, Vec<LlmJudgment>)>) {
     use crate::reason::client as oc;
     use crate::reason::payload as pl;
@@ -611,7 +616,14 @@ async fn run_one_batch<T: client::Transport>(
     let mut deep_listings = HashMap::new();
     if privacy == PrivacyTier::Deep {
         for c in batch {
-            if c.kind != crate::types::Kind::File {
+            // Depth-1 listings are restricted to the quantile middle band,
+            // EVEN in Deep read: attaching them to every surviving
+            // candidate (~2000 instead of ~200) would be a token and cost
+            // blowup. Bands are advisory for tiering, not for listings.
+            // Adjudication of a non-middle-band item at Deep privacy also
+            // travels without a listing — a single item is judged on its
+            // metadata.
+            if c.kind != crate::types::Kind::File && c.band == crate::types::Band::Middle {
                 if let Some(listing) =
                     pl::folder_listing(std::path::Path::new(&c.path), deep_cap)
                 {
@@ -623,8 +635,9 @@ async fn run_one_batch<T: client::Transport>(
 
     let payloads = pl::build_batch_payloads(batch, privacy, &deep_listings, deep_cap);
     let user = pr::build_user_prompt(&payloads, few_shot.as_slice());
+    let system: &str = system_override.as_deref().unwrap_or(pr::SYSTEM_PROMPT);
     let body = serde_json::to_string(&oc::build_request_body(
-        &model, pr::SYSTEM_PROMPT, &user, enforce_zdr,
+        &model, system, &user, enforce_zdr,
     ))
     .map_err(|e| DriftError::Reason(e.to_string()));
     let body = match body {
@@ -767,6 +780,7 @@ mod tests {
             score,
             score_components: ScoreComponents::default(),
             band: Band::Middle,
+            auto_high_basis: None,
         }
     }
 
@@ -880,6 +894,116 @@ mod tests {
         crate::events::CollectingSink::new()
     }
 
+    /// Records every request body, then answers with one judgment —
+    /// contract tests for the adjudication system-prompt override.
+    struct CaptureTransport {
+        bodies: std::sync::Mutex<Vec<String>>,
+        content: String,
+    }
+    impl client::Transport for CaptureTransport {
+        fn post_json<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a [(String, String)],
+            body: String,
+        ) -> client::BoxFut<'a, Result<(u16, String)>> {
+            self.bodies.lock().unwrap().push(body);
+            Box::pin(async { Ok((200, "{}".into())) })
+        }
+        fn post_json_stream<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a [(String, String)],
+            body: String,
+            on_update: &'a (dyn Fn(&client::StreamUpdate) + Send + Sync),
+            _cancel: &'a AtomicBool,
+        ) -> client::BoxFut<'a, Result<client::StreamedResponse>> {
+            self.bodies.lock().unwrap().push(body);
+            let content = self.content.clone();
+            Box::pin(async move {
+                on_update(&client::StreamUpdate::Delta(content.clone()));
+                Ok(client::StreamedResponse {
+                    content,
+                    cost_usd: 0.002,
+                    prompt_tokens: 8,
+                    completion_tokens: 4,
+                })
+            })
+        }
+    }
+
+    /// Adjudication runs through the same machinery but must (a) send the
+    /// adversarial system prompt instead of the standard one, and (b) with
+    /// batch_size forced to 1, put exactly one candidate in the request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adjudication_sends_adversarial_prompt_single_batch() {
+        let content = format!("[{}]", judgment_for("a", 3));
+        let transport = Arc::new(CaptureTransport {
+            bodies: std::sync::Mutex::new(Vec::new()),
+            content,
+        });
+        let cfg = Reasoning {
+            batch_size: 1,
+            ..Reasoning::default()
+        };
+        let out = reason_middle_band_with(
+            vec![candidate_at("/w1", "a", 50.0)],
+            PrivacyTier::Minimal,
+            &cfg,
+            "m",
+            "k",
+            true,
+            "test-adjudicate",
+            &[],
+            sink(),
+            Arc::new(AtomicBool::new(false)),
+            transport.clone(),
+            None,
+            Some("ADVERSARIAL: argue against the card"),
+        )
+        .await
+        .unwrap();
+
+        let bodies = transport.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1, "one item, one batch");
+        assert!(
+            bodies[0].contains("ADVERSARIAL: argue against the card"),
+            "the override system prompt must reach the request body"
+        );
+        assert!(!bodies[0].contains(crate::reason::prompt::SYSTEM_PROMPT));
+        assert!(out.judgments.contains_key("a"));
+        assert!((out.total_cost_usd - 0.002).abs() < 1e-9);
+    }
+
+    /// `None` keeps the standard prompt — existing scan behavior unchanged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn standard_scan_keeps_default_system_prompt() {
+        let content = format!("[{}]", judgment_for("a", 3));
+        let transport = Arc::new(CaptureTransport {
+            bodies: std::sync::Mutex::new(Vec::new()),
+            content,
+        });
+        let _ = reason_middle_band_with(
+            vec![candidate_at("/w1", "a", 50.0)],
+            PrivacyTier::Minimal,
+            &Reasoning::default(),
+            "m",
+            "k",
+            true,
+            "test-default-prompt",
+            &[],
+            sink(),
+            Arc::new(AtomicBool::new(false)),
+            transport.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let bodies = transport.bodies.lock().unwrap();
+        assert!(bodies[0].contains("reasoning stage of DriftWood"), "standard prompt in body");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn happy_path_assigns_judgments() {
         let content = format!("{},{}", judgment_for("a", 1), judgment_for("b", 4));
@@ -900,6 +1024,7 @@ mod tests {
             sink.clone(),
             Arc::new(AtomicBool::new(false)),
             transport,
+            None,
             None,
         )
         .await
@@ -943,6 +1068,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             transport,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -974,6 +1100,7 @@ mod tests {
             sink(),
             Arc::new(AtomicBool::new(false)),
             transport,
+            None,
             None,
         )
         .await
@@ -1017,6 +1144,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             transport,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1046,6 +1174,7 @@ mod tests {
             sink(),
             Arc::new(AtomicBool::new(false)),
             transport,
+            None,
             None,
         )
         .await
@@ -1079,6 +1208,7 @@ mod tests {
             sink(),
             Arc::new(AtomicBool::new(false)),
             transport,
+            None,
             None,
         )
         .await
@@ -1116,6 +1246,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             transport,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1144,6 +1275,7 @@ mod tests {
             cancel,
             Arc::new(HangTransport),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1169,6 +1301,7 @@ mod tests {
             sink(),
             cancel,
             transport,
+            None,
             None,
         )
         .await

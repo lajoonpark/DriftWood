@@ -137,6 +137,7 @@ mod tests {
             score,
             score_components: ScoreComponents::default(),
             band: Band::Middle,
+            auto_high_basis: None,
         }
     }
 

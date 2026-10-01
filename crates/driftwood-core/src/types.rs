@@ -63,8 +63,13 @@ impl std::fmt::Display for Tier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TierSource {
-    /// Top band: auto-labeled Driftwood, LLM skipped.
+    /// Top band: auto-labeled Driftwood, LLM skipped. Legacy: pre-honest-
+    /// tiers scans carried no argument for this stamp. No longer emitted.
     AutoHigh,
+    /// Top band, but with a real deterministic explanation of why the
+    /// auto-high rule fired. The tier is a heuristic verdict — the
+    /// reasoning says so, and no confidence word is rendered for it.
+    ArguedAutoHigh,
     /// Bottom band: auto-labeled Source, LLM skipped.
     AutoLow,
     /// Pinned by a local rule from rules.json.
@@ -76,10 +81,42 @@ pub enum TierSource {
     /// judgment was propagated. Never presented as an independent LLM
     /// judgment — one shared verdict, honestly labeled.
     LlmPropagated,
-    /// LLM failed / cost cap hit; heuristic band label used instead.
+    /// LLM failed / cost cap hit / user cancelled; the river WAS tried and
+    /// the heuristic band label is the damage control.
     Fallback,
+    /// The scan mode never asked the LLM about this item at all — the tier
+    /// is the heuristic estimate by design (an Express scan, or no API
+    /// key). Distinct from `Fallback`: "snagged" means the crossing failed;
+    /// this means there was no crossing, and no failure happened. A user
+    /// choosing a no-AI scan must not read per-card failure copy.
+    Heuristic,
     /// Hard never-flag list forced this to tier 4 minimum.
     NeverFlag,
+    /// System/vendor floor held this at Tier 3 (Current): the folder's
+    /// owner may be load-bearing for things outside one application, so
+    /// DriftWood declines to opine on its safety.
+    SystemFloor,
+    /// The river's on-demand second opinion for a single candidate. Shown
+    /// alongside the card, never applied to it — only an explicit user
+    /// re-stamp changes a tier.
+    Adjudication,
+}
+
+/// Why the auto-high rule promoted a candidate. Recorded at promotion time
+/// so the argued auto-high explanation can say what actually happened
+/// (which rule fired, which root, which orphan status).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoHighBasis {
+    /// Sits under a cache/log/tmp root (`~/Library/Caches`, `~/Library/Logs`,
+    /// `/tmp`, `/private/tmp`).
+    CacheRoot,
+    /// Orphaned folder under `~/Library/Application Support`: the owning
+    /// app is no longer installed.
+    OrphanedAppSupport,
+    /// Landed in the top quantile band of this scan's scores (Decision #4
+    /// banding) — promoted by the band, not by a location rule.
+    QuantileBand,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +204,10 @@ pub struct Candidate {
     pub score: f64,
     pub score_components: ScoreComponents,
     pub band: Band,
+    /// Why the auto-high rule promoted this candidate, recorded at
+    /// promotion time. `None` for everything that was not promoted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_high_basis: Option<AutoHighBasis>,
 }
 
 /// Aggregate stats gathered while sizing folders.

@@ -8,7 +8,7 @@ const ago = (days: number) => new Date(Date.now() - days * day).toISOString();
 
 export const MOCK_REPORT: Report = {
   groups: [
-    { category: "low", count: 14, bytes: 24_184_884_224 },
+    { category: "low", count: 15, bytes: 30_389_334_224 },
     { category: "medium", count: 5, bytes: 11_272_233_984 },
     { category: "high", count: 5, bytes: 4_829_634_560 },
   ],
@@ -33,12 +33,14 @@ export const MOCK_REPORT: Report = {
         score: 93.2,
         score_components: { size: 25, age: 25, cache_loc: 15, orphan: 15, depth: 3, file_type: 9.2, child_count: 1 },
         band: "high",
+        auto_high_basis: "cache_root",
       },
       tier: 1,
-      tier_source: "auto_high",
+      tier_source: "argued_auto_high",
       summary:
-        "Cache left behind by the Epic Games Launcher, which is no longer installed. It regenerates identically if the app ever returns.",
-      reasoning: "",
+        "Scored straight to Driftwood: it sits under ~/Library/Caches and its drift score landed in the top band. No AI reasoned about this folder — treat this tier as unverified, not cleared.",
+      reasoning:
+        "Auto-high heuristic (no AI reasoning was spent on this item):\n· Location: ~/Library/Caches — a cache/log root DriftWood treats as driftwood by definition.\n· Orphan status: orphaned — the owning app is no longer installed.\n· Drift score 93.2 of 100 landed in the top band (top 25% of this scan's scores): size 25.0, age 25.0, cache location 15.0, orphan 15.0, depth 3.0, file type 9.2, child count 1.0.\nThe tier is a heuristic verdict — it says \"this looks like driftwood by location and score\", not \"this is safe to clear\". Use \"Ask the river\" on the card for a real second opinion.",
       confidence: 1,
       privacy_tier_used: "minimal",
     },
@@ -57,12 +59,14 @@ export const MOCK_REPORT: Report = {
         score: 89.7,
         score_components: { size: 22, age: 25, cache_loc: 0, orphan: 15, depth: 4, file_type: 12.7, child_count: 3 },
         band: "high",
+        auto_high_basis: "cache_root",
       },
       tier: 1,
-      tier_source: "auto_high",
+      tier_source: "argued_auto_high",
       summary:
-        "Support folder for the Kagi browser, uninstalled over a year and a half ago. Nothing here is referenced by anything still installed.",
-      reasoning: "",
+        "Scored straight to Driftwood: it sits under ~/Library/Caches and its drift score landed in the top band. No AI reasoned about this folder — treat this tier as unverified, not cleared.",
+      reasoning:
+        "Auto-high heuristic (no AI reasoning was spent on this item):\n· Location: ~/Library/Caches — a cache/log root DriftWood treats as driftwood by definition.\n· Orphan status: orphaned — the owning app is no longer installed.\n· Drift score 89.7 of 100 landed in the top band (top 25% of this scan's scores): size 22.0, age 25.0, cache location 0.0, orphan 15.0, depth 4.0, file type 12.7, child count 3.0.\nThe tier is a heuristic verdict — it says \"this looks like driftwood by location and score\", not \"this is safe to clear\". Use \"Ask the river\" on the card for a real second opinion.",
       confidence: 1,
       privacy_tier_used: "minimal",
     },
@@ -155,15 +159,17 @@ export const MOCK_REPORT: Report = {
         scope_category: "low",
         score: 74.8,
         score_components: { size: 22, age: 20, cache_loc: 15, orphan: 0, depth: 3, file_type: 8.8, child_count: 2 },
-        band: "high",
+        band: "middle",
       },
       tier: 1,
-      tier_source: "auto_high",
+      tier_source: "llm",
       summary:
         "Old simulator logs from iOS development. Logs, not data — regenerated every time Xcode runs a simulator.",
-      reasoning: "",
-      confidence: 1,
-      privacy_tier_used: "minimal",
+      reasoning:
+        "These are diagnostic logs written by CoreSimulator runs, not simulator state or projects. The owning app (Xcode) is installed and manages the folder, so the auto-high heuristic correctly declined to fire — a live tool's log directory gets argued, not assumed. Deleting removes only historical logs; simulators recreate the directory on their next run.",
+      confidence: 0.94,
+      llm_model: "anthropic/claude-haiku-class",
+      privacy_tier_used: "standard",
     },
     {
       candidate: {
@@ -203,15 +209,17 @@ export const MOCK_REPORT: Report = {
         scope_category: "low",
         score: 78.2,
         score_components: { size: 25, age: 16, cache_loc: 15, orphan: 0, depth: 4, file_type: 8.2, child_count: 2 },
-        band: "high",
+        band: "middle",
       },
       tier: 1,
-      tier_source: "auto_high",
+      tier_source: "llm",
       summary:
         "Xcode build artifacts from projects last touched five months ago. Xcode rebuilds these on the next build — its own docs recommend clearing them.",
-      reasoning: "",
-      confidence: 1,
-      privacy_tier_used: "minimal",
+      reasoning:
+        "DerivedData holds per-project build products, indexes, and logs. Xcode is installed and recreates everything here from the project sources on the next build, so nothing is personal or hard to reproduce. Live app, argued tier: the only cost of clearing is the first rebuild being slower.",
+      confidence: 0.95,
+      llm_model: "anthropic/claude-haiku-class",
+      privacy_tier_used: "standard",
     },
     {
       candidate: {
@@ -338,8 +346,59 @@ export const MOCK_REPORT: Report = {
       privacy_tier_used: "minimal",
     },
     {
+      // An Express-scan middle-band item: the river was never asked. The
+      // provenance must read as by-design heuristic, not as a failure.
+      candidate: {
+        id: "c025",
+        path: "/Users/you/Library/Containers/com.division.Paralogue/Data/cache",
+        kind: "folder",
+        size_bytes: 12_642_880,
+        kind_stats: { children: 4, files: 61, cache_like_ratio: 0.7, truncated: false },
+        last_used_date: ago(240),
+        last_used_from_spotlight: false,
+        modified_date: ago(240),
+        orphan_status: "unknown",
+        scope_category: "medium",
+        score: 44.1,
+        score_components: { size: 5.5, age: 16, cache_loc: 0, orphan: 0, depth: 3, file_type: 7, child_count: 0.6 },
+        band: "middle",
+      },
+      tier: 3,
+      tier_source: "heuristic",
+      summary:
+        "Heuristic estimate — this scan never asked the river about this item.",
+      reasoning:
+        "No AI reasoning was spent on this item: the scan mode does not cross the river (Express scan, or no OpenRouter key configured). The tier comes from the drift score (44.1/100) and the still-in-the-current rule — it is a heuristic guess, honestly labeled. \"Ask the river\" on this card gives a real second opinion, and Standard or Deep read mode argues every middle-band item.",
+      confidence: 0.3,
+      privacy_tier_used: "standard",
+    },
+    {
       candidate: {
         id: "c013",
+        path: "/Users/you/Library/Caches/com.apple.HomeKit",
+        kind: "folder",
+        size_bytes: 6_204_450_000,
+        kind_stats: { children: 3, files: 48, cache_like_ratio: 0.3, truncated: false },
+        last_used_date: ago(380),
+        last_used_from_spotlight: true,
+        orphan_status: "active",
+        scope_category: "low",
+        score: 58.2,
+        score_components: { size: 20, age: 20, cache_loc: 15, orphan: 0, depth: 2, file_type: 1.2, child_count: 0 },
+        band: "middle",
+      },
+      tier: 3,
+      tier_source: "system_floor",
+      summary:
+        "System-managed folder (com.apple.*). DriftWood won't call this safe to clear.",
+      reasoning:
+        "The folder's name matches the system-owner list (com.apple.*): the vendor owns the OS or the whole suite, so this folder may be load-bearing for things outside that one application. DriftWood declines to opine — a path-shape rule is not a safety argument, and it will not call this safe to clear without reasoning.\nThis is NOT a judgment that the data is precious or that reacquiring it would hurt: DriftWood simply refuses to guess here. A user rule can re-stamp it (your re-stamps beat the floor), and \"Ask the river\" on the card gives a second opinion.",
+      confidence: 1,
+      privacy_tier_used: "minimal",
+    },
+    {
+      candidate: {
+        id: "c013b",
         path: "/Users/you/Library/Application Support/MobileSync/Backup",
         kind: "folder",
         size_bytes: 685_792_256,
@@ -451,12 +510,14 @@ export const MOCK_REPORT: Report = {
         score: 77.6,
         score_components: { size: 18, age: 23, cache_loc: 0, orphan: 15, depth: 3, file_type: 6.6, child_count: 2 },
         band: "high",
+        auto_high_basis: "quantile_band",
       },
       tier: 1,
-      tier_source: "auto_high",
+      tier_source: "argued_auto_high",
       summary:
-        "Sandbox container for a dev-build app that no longer exists anywhere on this Mac.",
-      reasoning: "",
+        "Scored straight to Driftwood: its drift score landed in the top 25% of this scan's scores. No AI reasoned about this folder — treat this tier as unverified, not cleared.",
+      reasoning:
+        "Auto-high heuristic (no AI reasoning was spent on this item):\n· Location: no location rule fired — the top quantile band alone put this here.\n· Orphan status: orphaned — the owning app is no longer installed.\n· Drift score 77.6 of 100 landed in the top band (top 25% of this scan's scores): size 18.0, age 23.0, cache location 0.0, orphan 15.0, depth 3.0, file type 6.6, child count 2.0.\nThe tier is a heuristic verdict — it says \"this looks like driftwood by location and score\", not \"this is safe to clear\". Use \"Ask the river\" on the card for a real second opinion.",
       confidence: 1,
       privacy_tier_used: "minimal",
     },
@@ -637,6 +698,7 @@ export const MOCK_NOTICES: Record<string, string[]> = {
 };
 
 export function mockScanEvents(cfg: ScanConfig, fail: boolean): Array<[number, ScanEvent]> {
+  const runsLlm = cfg.mode !== "express";
   const scale = cfg.scopes.length === 0 ? 0.2 : 0.5 + 0.35 * cfg.scopes.length;
   const script: Array<[number, ScanEvent]> = [
     [0, { type: "phase", phase: "enumerating" }],
@@ -658,14 +720,26 @@ export function mockScanEvents(cfg: ScanConfig, fail: boolean): Array<[number, S
     [6_800, { type: "notice", message: MOCK_NOTICES.filtering[0] }],
     [7_400, { type: "candidates_found", total: 118 }],
     [7_900, { type: "notice", message: MOCK_NOTICES.filtering[1] }],
+    [
+      8_100,
+      {
+        type: "notice",
+        message:
+          "3 system/vendor folders (9.1 GB) held at Current — DriftWood won't call them safe to clear",
+      },
+    ],
+    // Conservative recoverable: only what is already definitely disposable
+    // (auto-high, not floored/pinned). Corrections downward are possible
+    // and honest — the store takes the latest, never the max.
     [8_400, { type: "recoverable_bytes", total: 6_410_000_000 }],
     [8_900, { type: "phase", phase: "scoring" }],
     [9_300, { type: "notice", message: MOCK_NOTICES.scoring[0] }],
     [9_900, { type: "candidates_found", total: 214 }],
-    [10_300, { type: "recoverable_bytes", total: 36_810_000_000 }],
+    // The engine no longer restates an everything-sum mid-scan: the next
+    // recoverable emission is the exact tiers-1–2 total after assembly.
     [10_800, { type: "phase", phase: "reasoning" }],
   ];
-  if (cfg.stage2) {
+  if (runsLlm) {
     script.push(
       [11_200, { type: "notice", message: MOCK_NOTICES.reasoning[0] }],
       // Live Stage 2: batch signals + progress with a knowable denominator.
@@ -718,6 +792,9 @@ export function mockScanEvents(cfg: ScanConfig, fail: boolean): Array<[number, S
   script.push(
     [15_400, { type: "phase", phase: "assembling" }],
     [15_800, { type: "notice", message: MOCK_NOTICES.assembling[0] }],
+    // Exact post-assembly figure (tiers 1–2 only). It may sit below the
+    // conservative mid-scan value — corrections downward are information.
+    [16_100, { type: "recoverable_bytes", total: 5_820_000_000 }],
   );
   if (fail) {
     script.push([16_200, { type: "error", message: "Stage 2 lost mid-crossing: connection to the river dropped (network unreachable)." }]);

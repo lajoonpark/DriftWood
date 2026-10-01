@@ -9,6 +9,10 @@
     SCOPE_LABELS,
     TIER_BLURBS,
     TIER_NAMES,
+    type HandoffItem,
+    type HandoffPlan,
+    type RevealError,
+    type RevealSummary,
     type Report,
     type ReportEntry,
     type ScopeCategory,
@@ -54,6 +58,7 @@
       selected = new Set();
       scopeFilter = "all";
       visible = { 1: PAGE, 2: PAGE, 3: PAGE, 4: PAGE };
+      showAllContainers = false;
     }
   });
 
@@ -116,23 +121,103 @@
     visible = { ...visible, [tier]: (visible[tier] ?? PAGE) + PAGE };
   }
 
-  /* Handoff, not deletion: Finder opens with the selection preselected and
-   * the user presses Cmd+Delete themselves. The summary says exactly what
-   * opened — window cap included, nothing silently dropped. */
+  /* ---------- the hand-off ---------- */
+
+  /** The selection as hand-off items: path plus tier and personal-risk
+   *  scope, so the container view can judge what a folder aggregates. */
+  const selectedItems = $derived.by(() => {
+    if (!report) return [] as HandoffItem[];
+    return report.entries
+      .filter((e) => selected.has(e.candidate.id))
+      .map((e) => ({
+        path: e.candidate.path,
+        size_bytes: e.candidate.size_bytes,
+        tier: e.tier,
+        scope: e.candidate.scope_category,
+      }));
+  });
+
+  /** Pre-commit plan from the shell: containers after grouping, fold, and
+   *  guarded rollup, with findings-versus-total and vanished paths. */
+  let plan = $state<HandoffPlan | null>(null);
+  let planning = $state(false);
+  let planToken = 0;
+  $effect(() => {
+    const items = selectedItems;
+    // A changed selection invalidates any previous hand-off outcome.
+    lastResult = null;
+    handoffError = null;
+    if (items.length === 0) {
+      plan = null;
+      planning = false;
+      return;
+    }
+    planning = true;
+    const token = ++planToken;
+    const t = setTimeout(() => {
+      bridge
+        .planHandoff(items)
+        .then((p) => {
+          if (token === planToken) {
+            plan = p;
+            planning = false;
+          }
+        })
+        .catch(() => {
+          if (token === planToken) {
+            plan = null;
+            planning = false;
+            handoffError = "DriftWood could not measure the folders — try selecting again.";
+          }
+        });
+    }, 250);
+    return () => clearTimeout(t);
+  });
+
+  /** How many container rows show before "show all" — bounded like every
+   *  other list on this screen. */
+  const CONTAINER_PAGE = 12;
+  let showAllContainers = $state(false);
+
+  /** Below this findings-to-total share, a folder gets the ⌘A warning. */
+  const LOW_RATIO = 0.5;
+  function ratioWarning(findings: number, total: number | null): string | null {
+    if (total === null || total === 0 || findings >= total) return null;
+    if (findings / total >= LOW_RATIO) return null;
+    return `Only ${formatCount(findings)} of ${formatCount(total)} items in this folder ${findings === 1 ? "is" : "are"} driftwood — ⌘A or a stray select-all would reach far beyond your selection.`;
+  }
+
   let handing = $state(false);
-  async function handOff() {
-    if (!report || selection.count === 0 || handing) return;
+  let lastResult = $state<RevealSummary | null>(null);
+  let handoffError = $state<string | null>(null);
+  /** macOS refused the Finder consent (-1743): a calm explanation, not a
+   *  dead button. Stays until a hand-off succeeds. */
+  let automationDenied = $state(false);
+
+  async function handOff(folders?: string[]) {
+    if (!report || handing || selection.count === 0) return;
     handing = true;
+    handoffError = null;
     try {
-      const paths = report.entries
-        .filter((e) => selected.has(e.candidate.id))
-        .map((e) => e.candidate.path);
-      const sum = await bridge.revealAll(paths);
-      let msg = `Opened ${sum.windows} Finder window${sum.windows === 1 ? "" : "s"} with ${formatCount(sum.items)} items preselected — press ⌘Delete there yourself. DriftWood deleted nothing.`;
-      if (sum.skipped_groups > 0) {
-        msg += ` ${formatCount(sum.skipped_groups)} folder${sum.skipped_groups === 1 ? "" : "s"} (${formatCount(sum.skipped_items)} items) didn't fit the window cap — reveal them from a smaller selection.`;
+      const sum = await bridge.revealAll(selectedItems, folders);
+      lastResult = sum;
+      let msg = `Finder has ${formatCount(sum.items_selected)} of ${formatCount(sum.items_requested)} findings preselected across ${sum.windows} window${sum.windows === 1 ? "" : "s"} — press ⌘Delete there. DriftWood deleted nothing.`;
+      if (sum.items_selected !== sum.items_requested) {
+        msg += " Some selections didn't take — see the hand-off report.";
+      }
+      if (sum.skipped.length > 0) {
+        msg += ` ${formatCount(sum.skipped.length)} path${sum.skipped.length === 1 ? " was" : "s were"} already gone.`;
       }
       toast(msg);
+    } catch (e) {
+      if (e && typeof e === "object" && (e as RevealError).kind === "automation_denied") {
+        automationDenied = true;
+      } else {
+        handoffError =
+          e && typeof e === "object" && "message" in e
+            ? String((e as { message: unknown }).message)
+            : "The hand-off to Finder did not go through.";
+      }
     } finally {
       handing = false;
     }
@@ -246,7 +331,7 @@
                     {SCOPE_LABELS[c.scope_category]} · last used {relDate(c.last_used_date)} · {formatBytes(c.size_bytes)}
                     {#if e.tier_source === "llm_propagated"}
                       · shared cluster judgment
-                    {:else if e.tier_source === "fallback"}
+                    {:else if e.tier_source === "fallback" || e.tier_source === "heuristic"}
                       · heuristic estimate
                     {/if}
                   </span>
@@ -264,22 +349,136 @@
       {/each}
     </div>
 
+    {#if selection.count > 0}
+      <section class="handoff-panel" in:fade={{ duration: 400 }}>
+        <div class="hp-head">
+          <p class="kicker">The hand-off</p>
+          <p class="serif-lead">
+            {#if plan}
+              Your {formatCount(selection.count)} findings live in
+              {formatCount(plan.groups.length)} folder{plan.groups.length === 1 ? "" : "s"}.
+              Each folder opens as one Finder window with exactly those findings
+              preselected — press ⌘Delete there yourself.
+            {:else if planning}
+              Measuring the folders your selection lives in…
+            {/if}
+          </p>
+        </div>
+
+        {#if automationDenied}
+          <div class="hp-denied">
+            <p class="serif-lead">
+              <strong>macOS needs a yes from you.</strong> DriftWood asks to control Finder —
+              that is how it opens windows with your findings preselected. It uses that
+              permission for nothing else, and it still deletes nothing itself.
+              System Settings → Privacy &amp; Security → Automation → Finder → DriftWood.
+            </p>
+            <div class="hp-denied-actions">
+              <button class="btn btn-ghost" onclick={() => bridge.openAutomationSettings()}>
+                Open Automation Settings
+              </button>
+              <button class="btn-quiet" disabled={handing} onclick={() => handOff()}>
+                Try the hand-off again
+              </button>
+            </div>
+          </div>
+        {:else if plan}
+          {#if plan.skipped.length > 0}
+            <p class="hpg-warn">
+              {formatCount(plan.skipped.length)} finding{plan.skipped.length === 1 ? " has" : "s have"}
+              vanished since the scan and will be skipped — caches go when their own apps clear them.
+            </p>
+          {/if}
+          <ul class="hp-groups">
+            {#each (showAllContainers ? plan.groups : plan.groups.slice(0, CONTAINER_PAGE)) as g (g.folder)}
+              <li class="hp-group" class:tainted={g.tainted}>
+                <div class="hpg-text">
+                  <span class="hpg-folder mono" title={g.folder}>{truncateMiddle(g.folder, 60)}</span>
+                  <span class="hpg-meta num">
+                    {#if g.total_in_folder === null}
+                      total unknown ·
+                    {:else}
+                      {formatCount(g.total_in_folder)} item{g.total_in_folder === 1 ? "" : "s"} in this folder ·
+                    {/if}
+                    {formatCount(g.findings)} {g.findings === 1 ? "is" : "are"} driftwood · {formatBytes(g.finding_bytes)} of findings
+                  </span>
+                  {#if ratioWarning(g.findings, g.total_in_folder)}
+                    <p class="hpg-warn">{ratioWarning(g.findings, g.total_in_folder)}</p>
+                  {/if}
+                  {#if g.tainted}
+                    <p class="hpg-warn">This folder holds Source items — {TIER_BLURBS[4]}</p>
+                  {/if}
+                </div>
+                <button
+                  class="btn-quiet hpg-btn"
+                  disabled={handing || automationDenied}
+                  onclick={() => handOff([g.folder])}
+                >
+                  Hand off this folder
+                </button>
+              </li>
+            {/each}
+          </ul>
+          {#if plan.groups.length > CONTAINER_PAGE && !showAllContainers}
+            <button class="btn-quiet more" onclick={() => (showAllContainers = true)}>
+              Show all {formatCount(plan.groups.length)} folders
+            </button>
+          {/if}
+        {/if}
+
+        {#if handoffError}
+          <p class="hpg-warn">{handoffError}</p>
+        {/if}
+
+        {#if lastResult}
+          <div class="hp-result">
+            <p class="kicker">What Finder reports</p>
+            {#each lastResult.groups as g (g.folder)}
+              <p class="hp-line">
+                <span class="mono">{truncateMiddle(g.folder, 48)}</span> —
+                {#if g.ok}
+                  {formatCount(g.selected)} of {formatCount(g.requested)} preselected.
+                {:else}
+                  <span class="warn-text">
+                    {g.error ??
+                      `Finder selected ${formatCount(g.selected)} of ${formatCount(g.requested)} — a mismatch.`}
+                  </span>
+                {/if}
+              </p>
+            {/each}
+            {#each lastResult.skipped as s (s.path)}
+              <p class="hp-line">
+                <span class="mono">{truncateMiddle(s.path, 48)}</span> — skipped: {s.reason}
+              </p>
+            {/each}
+          </div>
+        {/if}
+      </section>
+    {/if}
+
     <footer class="rv" use:reveal>
       <button class="btn-quiet" onclick={onBack}>Back to the report</button>
       <div class="handoff">
         {#if selection.count > 0 && selection.hasSource}
           <p class="warn-note">Your selection includes Source items — double-check each one.</p>
         {/if}
-        <button class="btn btn-primary" disabled={selection.count === 0 || handing} onclick={handOff}>
+        <button
+          class="btn btn-primary"
+          disabled={selection.count === 0 || handing || automationDenied}
+          onclick={() => handOff()}
+        >
           {handing
             ? "Opening Finder…"
             : selection.count === 0
               ? "Show these in Finder"
-              : `Show ${formatCount(selection.count)} in Finder (${formatBytes(selection.bytes)})`}
+              : plan && plan.groups.length > 0
+                ? `Open ${formatCount(plan.groups.length)} folders in Finder (${formatCount(selection.count)} findings)`
+                : `Show ${formatCount(selection.count)} in Finder (${formatBytes(selection.bytes)})`}
         </button>
         <p class="foot-note">
-          A handoff, not a deletion — DriftWood shows you exactly what to clear and hands it to
-          Finder. You press ⌘Delete there. DriftWood deleted nothing. It never does.
+          A handoff, not a deletion — DriftWood opens your folders in Finder with exactly its
+          findings preselected, and you press ⌘Delete there. DriftWood deleted nothing. It never
+          does.
         </p>
       </div>
     </footer>
@@ -504,6 +703,107 @@
     justify-content: space-between;
     gap: 28px;
     margin-top: 54px;
+  }
+
+  /* ---------- the hand-off panel ---------- */
+
+  .handoff-panel {
+    margin-top: 54px;
+    border-top: 1px solid var(--hairline);
+    padding-top: 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .hp-head .serif-lead {
+    margin-top: 6px;
+    max-width: 640px;
+  }
+
+  .hp-groups {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .hp-group {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 13px 8px;
+    border-bottom: 1px solid var(--hairline-soft);
+    border-radius: 8px;
+    transition: background-color 0.2s;
+  }
+
+  .hp-group.tainted {
+    background: rgba(168, 85, 47, 0.07);
+  }
+
+  .hpg-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .hpg-folder {
+    font-size: 12.5px;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .hpg-meta {
+    font-size: 11.5px;
+    color: var(--ink-faint);
+  }
+
+  .hpg-warn {
+    font-size: 12px;
+    color: var(--warn);
+    margin-top: 2px;
+  }
+
+  .hpg-btn {
+    flex: none;
+  }
+
+  .hp-denied {
+    border: 1px solid var(--hairline);
+    border-left: 3px solid var(--warn);
+    border-radius: 10px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 640px;
+  }
+
+  .hp-denied-actions {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .hp-result {
+    border-top: 1px dashed var(--hairline);
+    padding-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .hp-line {
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+
+  .warn-text {
+    color: var(--warn);
   }
 
   .handoff {

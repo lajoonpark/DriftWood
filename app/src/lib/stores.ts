@@ -4,6 +4,7 @@ import type {
   Report,
   ScanConfig,
   ScanEvent,
+  ScanMode,
   ScopeCategory,
   Phase,
 } from "./types";
@@ -51,7 +52,7 @@ export const SCOPE_FOLDERS: Record<ScopeCategory, { path: string; hint: string }
 export const DEFAULT_SETTINGS = {
   model: "anthropic/claude-haiku-4.5",
   costCap: 0.5,
-  expressScan: false,
+  scanMode: "standard" as ScanMode,
   allowNonZdr: false,
 };
 
@@ -66,9 +67,9 @@ export interface AppSettings {
   costCap: number;
   /** OpenRouter API key (sk-or-…). Stays on this machine. */
   apiKey: string;
-  /** Express Scan: skip AI reasoning entirely — heuristic tiers only,
-   *  instant and free. Honest about it in the report. */
-  expressScan: boolean;
+  /** How much of the river to run: express (free, heuristic tiers only),
+   *  standard (middle band argued), deep read (everything argued). */
+  scanMode: ScanMode;
   /** Danger zone: when false (default), every Stage-2 call is routed only
    *  to zero-data-retention providers. When true, OpenRouter may route to
    *  any provider — required for most free models, not recommended. */
@@ -78,7 +79,27 @@ export interface AppSettings {
 function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return { ...DEFAULT_SETTINGS, apiKey: "", ...(JSON.parse(raw) as Partial<AppSettings>) };
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<AppSettings> & {
+        expressScan?: boolean;
+      };
+      /* Migration from the old expressScan boolean (same localStorage key,
+         same merge shape — old installs keep everything else they saved):
+           expressScan: true  → Express (they opted out of AI before)
+           expressScan: false → Standard (they ran full Stage 2 before;
+                                        deliberately NOT moved to the new
+                                        third mode — that would be a silent
+                                        behavior change for existing users)
+         A saved scanMode always wins. */
+      const migrated: ScanMode = parsed.scanMode ??
+        (parsed.expressScan === true ? "express" : "standard");
+      return {
+        ...DEFAULT_SETTINGS,
+        apiKey: "",
+        ...parsed,
+        scanMode: migrated,
+      };
+    }
   } catch {
     /* fresh start */
   }
@@ -192,6 +213,10 @@ export interface ScanState {
   feed: FeedLine[];
   error: string | null;
   report: Report | null;
+  /** Session-cumulative adjudication spend on top of the report's own
+   *  Stage 2 total — the backend also folds it into the persisted report,
+   *  but the in-memory copy loaded earlier would otherwise understate. */
+  adjudicationCostUsd: number;
 }
 
 function initialReasoning(): ReasoningState {
@@ -225,6 +250,7 @@ const initialScan: ScanState = {
   feed: [],
   error: null,
   report: null,
+  adjudicationCostUsd: 0,
 };
 
 /** EMA factor: heavy enough to settle after the first two batches,
@@ -240,6 +266,7 @@ function createScanStore() {
       set({
         ...initialScan,
         report: get(scan).report,
+        adjudicationCostUsd: get(scan).report?.adjudication_cost_usd ?? 0,
       }),
     setStopping: () => update((s) => ({ ...s, stopping: true })),
     applyEvent: (e: ScanEvent) =>
@@ -254,7 +281,11 @@ function createScanStore() {
           case "candidates_found":
             return { ...s, candidates: Math.max(s.candidates, e.total) };
           case "recoverable_bytes":
-            return { ...s, recoverableBytes: Math.max(s.recoverableBytes, e.total) };
+            // Take the latest, never the max: the counter is conservative
+            // while tiers are still unknown and exact once assembly is
+            // done — a correction downward is real information, and
+            // Math.max would pin the stale overstated figure.
+            return { ...s, recoverableBytes: e.total };
           case "reasoning_progress": {
             const now = Date.now();
             const r = s.reasoning ?? initialReasoning();
@@ -326,7 +357,33 @@ function createScanStore() {
         reasoning: running ? null : s.reasoning,
       })),
     setReport: (report: Report) =>
-      update((s) => ({ ...s, report, running: false, stopping: false })),
+      update((s) => ({
+        ...s,
+        report,
+        running: false,
+        stopping: false,
+        adjudicationCostUsd: report.adjudication_cost_usd ?? 0,
+      })),
+    /** Restore the last persisted report (app relaunch) into an empty
+     *  store. A store that already has a report — a fresh scan finished
+     *  while the disk read was in flight — is never overwritten. */
+    loadPersisted: (report: Report): boolean => {
+      let applied = false;
+      update((s) => {
+        if (s.report) return s;
+        applied = true;
+        return {
+          ...s,
+          report,
+          adjudicationCostUsd: report.adjudication_cost_usd ?? 0,
+        };
+      });
+      return applied;
+    },
+    /** Adjudications spend after the scan; the honest report total is
+     *  scan spend + this. The backend persists the same figure. */
+    addAdjudicationCost: (cost: number) =>
+      update((s) => ({ ...s, adjudicationCostUsd: s.adjudicationCostUsd + cost })),
   };
 }
 

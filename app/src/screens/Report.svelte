@@ -5,6 +5,7 @@
   import { reveal } from "../lib/motion";
   import { formatBytes, formatCount } from "../lib/format";
   import { scan } from "../lib/stores";
+  import { bridge } from "../lib/bridge";
   import {
     SCOPE_LABELS,
     TIER_NAMES,
@@ -15,8 +16,22 @@
 
   let { onRescan, onBrowser }: { onRescan: () => void; onBrowser: () => void } = $props();
 
-  const report = $derived($scan.report as Report);
-  const stoppedEarly = $derived(Boolean(report.stopped_early));
+  /* The report may not be in the store yet (deep link, fresh app): pull the
+   * last persisted one through the bridge — the mock answers so the screen
+   * stays fully reviewable in the browser. Without this the screen renders
+   * blank the moment the store is cold. */
+  const stored = $derived($scan.report);
+  let loaded = $state<Report | null>(null);
+  $effect(() => {
+    if (!stored && !loaded) {
+      void bridge.getLastReport().then((r) => {
+        if (r) loaded = r;
+      });
+    }
+  });
+
+  const report = $derived(stored ?? loaded);
+  const stoppedEarly = $derived(Boolean(report?.stopped_early));
 
   /* Effective tiers: overrides win over the report's assignment. */
   let overrides = $state<Record<string, Tier>>({});
@@ -26,8 +41,8 @@
   let tierFilter = $state<Tier | null>(null);
 
   $effect(() => {
-    if (report.entries[0]?.candidate.id !== reportId) {
-      reportId = report.entries[0]?.candidate.id ?? null;
+    if (report?.entries[0]?.candidate.id !== reportId) {
+      reportId = report?.entries[0]?.candidate.id ?? null;
       overrides = {};
       tierFilter = null;
     }
@@ -40,14 +55,17 @@
   }
 
   const visibleEntries = $derived(
-    tierFilter === null
-      ? report.entries
-      : report.entries.filter((e) => effTier(e.candidate.id, e.tier) === tierFilter),
+    report === null
+      ? []
+      : tierFilter === null
+        ? report.entries
+        : report.entries.filter((e) => effTier(e.candidate.id, e.tier) === tierFilter),
   );
 
   /* Groups rebuilt from the visible entries so counts and bytes reflect
      the active tier filter. */
   const groups = $derived.by(() => {
+    if (report === null) return [];
     const map = new Map<ScopeCategory, typeof report.entries>();
     for (const e of visibleEntries) {
       let list = map.get(e.candidate.scope_category);
@@ -71,10 +89,36 @@
       });
   });
 
-  const totalBytes = $derived(report.groups.reduce((n, g) => n + g.bytes, 0));
+  /* The headline is what the app actually offers up: tiers 1–2, the ones
+     whose own blurbs say disposable. Summing every finding (the old
+     behavior) made the headline 2.1× the actionable figure on a real
+     scan — 6.75 GB of Source-tier "don't touch" data was reading as
+     "could be freed". Overrides apply: a user re-stamp moves bytes. */
+  const actionableBytes = $derived(
+    (report?.entries ?? []).reduce(
+      (n, e) => (effTier(e.candidate.id, e.tier) <= 2 ? n + e.candidate.size_bytes : n),
+      0,
+    ),
+  );
+
+  /* The neutral figure — every finding in the report, all tiers. Kept
+     visible but labeled, so the two numbers can never be confused. */
+  const allFindingsBytes = $derived((report?.entries ?? []).reduce((n, e) => n + e.candidate.size_bytes, 0));
+
+  /* Honest spend: the scan's own Stage 2 total plus every on-demand
+     adjudication. A "$0.12 spent" report when adjudications took it to
+     $0.13 is exactly the dishonesty this total exists to prevent. */
+  const totalSpend = $derived(
+    (report?.llm_cost_usd ?? 0) +
+      (report?.adjudication_cost_usd ?? 0) +
+      // Session adjudications on top of the report as loaded (the backend
+      // has already folded them into the persisted file).
+      Math.max(0, $scan.adjudicationCostUsd - (report?.adjudication_cost_usd ?? 0)),
+  );
 
   const tierCounts = $derived.by(() => {
     const counts: Record<Tier, number> = { 1: 0, 2: 0, 3: 0, 4: 0 };
+    if (report === null) return counts;
     for (const e of report.entries) counts[effTier(e.candidate.id, e.tier)]++;
     return counts;
   });
@@ -90,6 +134,7 @@
 
 <div class="report" in:fade={{ duration: 400 }}>
   <div class="inner">
+    {#if report}
     <header>
       <p class="kicker rv" use:reveal>Field notes</p>
       <h1 class="rv" use:reveal style="--rv-delay:120ms">What the river gave back.</h1>
@@ -97,7 +142,8 @@
       <div class="stats rv" use:reveal style="--rv-delay:320ms">
         <div class="stat main">
           <span class="kicker">Could be freed</span>
-          <span class="big">{formatBytes(totalBytes)}</span>
+          <span class="big">{formatBytes(actionableBytes)}</span>
+          <span class="sub-note">tiers 1–2 only · all findings: {formatBytes(allFindingsBytes)}</span>
         </div>
         <div class="rule-v"></div>
         <div class="stamps">
@@ -119,6 +165,18 @@
           <span class="kicker">Findings</span>
           <span class="mid num">{formatCount(report.entries.length)}</span>
         </div>
+        {#if totalSpend > 0}
+          <div class="rule-v"></div>
+          <div class="stat">
+            <span class="kicker">River spend</span>
+            <span class="mid num">${totalSpend.toFixed(4)}</span>
+            {#if $scan.adjudicationCostUsd > 0}
+              <span class="adj-spend num">
+                incl. ${$scan.adjudicationCostUsd.toFixed(4)} asked-for second opinions
+              </span>
+            {/if}
+          </div>
+        {/if}
       </div>
 
       {#if stoppedEarly}
@@ -183,6 +241,18 @@
       {/if}
       <p class="foot-note">DriftWood deleted nothing. It never does.</p>
     </footer>
+    {:else}
+    <div class="empty">
+      <p class="kicker rv" use:reveal>Field notes</p>
+      <h1 class="rv" use:reveal style="--rv-delay:120ms">No report yet.</h1>
+      <p class="serif-lead rv" use:reveal style="--rv-delay:260ms">
+        Search the river first — everything it finds shows up here.
+      </p>
+      <div class="actions rv" use:reveal style="--rv-delay:380ms">
+        <button class="btn btn-primary" onclick={rescan}>Search the river</button>
+      </div>
+    </div>
+    {/if}
   </div>
 </div>
 
@@ -203,6 +273,15 @@
     margin: 12px 0 30px;
   }
 
+  .empty {
+    text-align: center;
+    padding-top: 8vh;
+  }
+
+  .empty .actions {
+    margin-top: 30px;
+  }
+
   .stats {
     display: flex;
     align-items: center;
@@ -214,6 +293,13 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
+  }
+
+  /* The fine print under the headline: says what the big number counts
+     so the actionable figure and the all-findings figure cannot blur. */
+  .sub-note {
+    font-size: 12px;
+    color: var(--ink-faint);
   }
 
   .big {
@@ -230,6 +316,11 @@
     font-size: 24px;
     color: var(--ink);
     line-height: 1;
+  }
+
+  .adj-spend {
+    font-size: 11px;
+    color: var(--ink-faint);
   }
 
   .rule-v {

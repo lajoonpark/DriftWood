@@ -41,6 +41,11 @@ enum Command {
         /// Run Stage 2 (LLM reasoning). Requires OPENROUTER_API_KEY.
         #[arg(long)]
         llm: bool,
+        /// Deep read: bands are advisory — every surviving candidate is
+        /// argued (implies --llm). Costs far more than --llm; clustering
+        /// is what keeps it affordable.
+        #[arg(long)]
+        deep_read: bool,
         #[arg(long, value_enum, default_value = "standard")]
         privacy: Privacy,
         #[arg(long)]
@@ -95,6 +100,7 @@ fn main() {
         Command::Scan {
             scope,
             llm,
+            deep_read,
             privacy,
             model,
             cost_cap,
@@ -103,7 +109,8 @@ fn main() {
             dump_components,
             quiet,
         } => rt.block_on(cmd_scan(
-            scope, llm, privacy, model, cost_cap, weights, band_cutoffs, dump_components, quiet,
+            scope, llm, deep_read, privacy, model, cost_cap, weights, band_cutoffs,
+            dump_components, quiet,
         )),
         Command::Diff { report_a, report_b } => {
             cmd_diff(&report_a, &report_b)
@@ -208,6 +215,7 @@ fn human_bytes(n: u64) -> String {
 async fn cmd_scan(
     scope: Scope,
     llm: bool,
+    deep_read: bool,
     privacy: Privacy,
     model: Option<String>,
     cost_cap: Option<f64>,
@@ -265,7 +273,13 @@ async fn cmd_scan(
     let config = ScanConfig {
         scopes: scope_categories(scope),
         privacy_tier: parse_privacy(privacy),
-        stage2: llm,
+        mode: if deep_read {
+            driftwood_core::ScanMode::DeepRead
+        } else if llm {
+            driftwood_core::ScanMode::Standard
+        } else {
+            driftwood_core::ScanMode::Express
+        },
         model: model.unwrap_or_else(|| driftwood_core::default_model().to_string()),
         api_key,
         allow_non_zdr: false,

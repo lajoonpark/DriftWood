@@ -3,11 +3,16 @@
   import RiverArt from "../components/RiverArt.svelte";
   import StatusLine from "../components/StatusLine.svelte";
   import Counter from "../components/Counter.svelte";
-  import Toggle from "../components/Toggle.svelte";
   import { bridge } from "../lib/bridge";
   import { formatBytes, formatCount } from "../lib/format";
   import { onboarding, scan, toast, SCOPE_FOLDERS, appSettings, saveSettings } from "../lib/stores";
-  import { PRIVACY_LABELS, type Report, type ScanConfig } from "../lib/types";
+  import {
+    PRIVACY_LABELS,
+    SCAN_MODE_LABELS,
+    type Report,
+    type ScanConfig,
+    type ScanMode,
+  } from "../lib/types";
 
   let { onDone }: { onDone: () => void } = $props();
 
@@ -26,9 +31,7 @@
     return {
       scopes,
       privacy_tier: s.privacy,
-      // Express Scan: skip Stage 2 entirely — heuristic tiers only,
-      // instant and free, honestly labeled as fallback in the report.
-      stage2: !$appSettings.expressScan,
+      mode: $appSettings.scanMode,
       model: $appSettings.model,
       api_key: $appSettings.apiKey.trim() || undefined,
       cost_cap_usd: $appSettings.costCap,
@@ -97,8 +100,35 @@
     bridge.cancelScan();
   }
 
-  function setExpress(v: boolean) {
-    saveSettings({ ...$appSettings, expressScan: v });
+  const MODES: ScanMode[] = ["express", "standard", "deep_read"];
+
+  const MODE_HINTS: Record<ScanMode, string> = {
+    express: "Fast, free, heuristic tiers only — no AI reasoning.",
+    standard: "The middle band is argued by AI; extremes are heuristic. Cost-capped.",
+    deep_read:
+      "Bands are advisory — every surviving finding is argued by AI. On a large scan this can send ~10× more items to the river than Standard; clustering keeps it affordable, and your cost cap still applies.",
+  };
+
+  /* Pre-commit estimate: grounded in the last real scan when one exists,
+     concrete even when it doesn't. */
+  const deepReadEstimate = $derived.by(() => {
+    const last: Report | null = $scan.report;
+    if (last && last.entries.length > 0) {
+      const lastMiddle = last.entries.filter(
+        (e) => e.candidate.band === "middle",
+      ).length;
+      const n = last.entries.length;
+      const factor =
+        lastMiddle > 0 ? Math.max(1, Math.round(n / lastMiddle)) : 10;
+      return `Last scan found ${formatCount(n)} findings (${formatCount(
+        lastMiddle,
+      )} in the middle band). Deep read would argue about roughly all of them — about ${factor}× Standard's river traffic.`;
+    }
+    return "On a typical full scan Deep read sends thousands of candidates to the river instead of hundreds.";
+  });
+
+  function setMode(m: ScanMode) {
+    saveSettings({ ...$appSettings, scanMode: m });
   }
 
   const intensity = $derived(st.running ? 2 : 1);
@@ -188,17 +218,27 @@
         <p class="scope-line" in:fade={{ duration: 600, delay: 560 }}>
           {scopeSummary} · cap ${$appSettings.costCap.toFixed(2)}
         </p>
-        <label class="express" in:fade={{ duration: 600, delay: 660 }}>
-          <Toggle
-            checked={$appSettings.expressScan}
-            onchange={setExpress}
-            label="Skip AI reasoning"
-          />
-          <span class="express-copy">
-            Skip AI reasoning
-            <span class="express-hint">— fast, free, heuristic tiers only</span>
-          </span>
-        </label>
+        <div class="mode" in:fade={{ duration: 600, delay: 660 }}>
+          <div class="mode-row" role="radiogroup" aria-label="Scan mode">
+            {#each MODES as m (m)}
+              <button
+                class="mode-btn"
+                class:active={$appSettings.scanMode === m}
+                role="radio"
+                aria-checked={$appSettings.scanMode === m}
+                onclick={() => setMode(m)}
+              >
+                {SCAN_MODE_LABELS[m]}
+              </button>
+            {/each}
+          </div>
+          <p class="mode-hint" class:deep={$appSettings.scanMode === "deep_read"}>
+            {MODE_HINTS[$appSettings.scanMode]}
+            {#if $appSettings.scanMode === "deep_read"}
+              <span class="estimate">{deepReadEstimate}</span>
+            {/if}
+          </p>
+        </div>
         <div class="actions" in:fly={{ y: 14, duration: 600, delay: 780 }}>
           <button class="btn btn-primary cta" onclick={start}>Search the river</button>
           {#if st.report}
@@ -247,18 +287,51 @@
     letter-spacing: 0.06em;
   }
 
-  .express {
+  .mode {
     margin-top: 16px;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 12px;
-    cursor: pointer;
-    font-size: 13.5px;
-    color: var(--ink-soft);
+    gap: 10px;
   }
 
-  .express-hint {
+  .mode-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .mode-btn {
+    padding: 8px 18px;
+    border-radius: 999px;
+    font-size: 13px;
+    color: var(--ink-soft);
+    background: rgba(255, 255, 255, 0.35);
+    box-shadow: inset 0 0 0 1px var(--hairline);
+    transition:
+      color 0.25s,
+      box-shadow 0.25s;
+  }
+
+  .mode-btn.active {
+    color: var(--ink);
+    box-shadow: inset 0 0 0 1.5px var(--river-mid);
+  }
+
+  .mode-hint {
+    max-width: 480px;
+    font-size: 12.5px;
     color: var(--ink-faint);
+    line-height: 1.5;
+  }
+
+  .mode-hint.deep {
+    color: var(--warn);
+  }
+
+  .estimate {
+    display: block;
+    margin-top: 4px;
+    color: var(--ink-soft);
   }
 
   .actions {

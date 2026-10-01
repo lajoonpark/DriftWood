@@ -16,6 +16,19 @@
     }
   }
 
+  /** The Finder hand-off consent. The first probe makes macOS show its own
+   *  dialog, which waits for the user — give it room, unlike the FDA check. */
+  let autoStatus = $state<FdaStatus | "checking" | null>(null);
+
+  async function checkAutomation() {
+    autoStatus = "checking";
+    try {
+      autoStatus = await withTimeout(bridge.checkAutomationPermission(), 60_000);
+    } catch {
+      autoStatus = "unknown";
+    }
+  }
+
   function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
     return Promise.race([
       p,
@@ -100,6 +113,56 @@
       {/if}
     </div>
 
+    <div class="check auto-check rv" use:reveal style="--rv-delay:880ms">
+      <p class="kicker">Finder hand-off</p>
+      {#if autoStatus === null}
+        <button class="btn btn-ghost" onclick={checkAutomation}>Check Finder access</button>
+        <p class="steps">
+          When you hand a selection over, DriftWood opens Finder windows with your findings
+          preselected so you can press ⌘Delete there. macOS will ask for your OK the first time —
+          DriftWood uses it for nothing else, and it never deletes anything itself.
+        </p>
+      {:else if autoStatus === "checking"}
+        <div class="pending" in:fade>
+          <span class="ripple"></span>
+          <span class="serif-lead">macOS is asking — take your time.</span>
+        </div>
+      {:else if autoStatus === "granted"}
+        <div class="verdict ok" in:fly={{ y: 10, duration: 400 }}>
+          <span class="dot"></span>
+          <span class="serif-lead">Finder is ready for the hand-off.</span>
+        </div>
+      {:else if autoStatus === "unknown"}
+        <div class="verdict" in:fly={{ y: 10, duration: 400 }}>
+          <span class="dot deny"></span>
+          <div>
+            <p class="serif-lead">Couldn't check just now — the hand-off will ask when you use it.</p>
+            <div class="verdict-actions">
+              <button class="btn-quiet" onclick={checkAutomation}>Check again</button>
+            </div>
+          </div>
+        </div>
+      {:else}
+        <div class="verdict" in:fly={{ y: 10, duration: 400 }}>
+          <span class="dot deny"></span>
+          <div>
+            <p class="serif-lead">Finder control was declined — the hand-off can't open windows yet.</p>
+            <p class="steps">
+              System Settings → Privacy &amp; Security → Automation → Finder → DriftWood.
+              DriftWood uses it only to open windows with your findings preselected — for
+              nothing else.
+            </p>
+            <div class="verdict-actions">
+              <button class="btn btn-ghost" onclick={() => bridge.openAutomationSettings()}>
+                Open Automation Settings
+              </button>
+              <button class="btn-quiet" onclick={checkAutomation}>Check again</button>
+            </div>
+          </div>
+        </div>
+      {/if}
+    </div>
+
     <footer class="rv" use:reveal style="--rv-delay:950ms">
       <button class="btn-quiet" onclick={onBack}>Back</button>
       <button class="btn btn-primary" onclick={onNext}>
@@ -172,6 +235,14 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 14px;
+  }
+
+  .auto-check {
+    margin-top: 26px;
+  }
+
+  .auto-check .steps {
+    margin-top: 0;
   }
 
   .upfront {

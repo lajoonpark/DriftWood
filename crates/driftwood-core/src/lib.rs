@@ -16,12 +16,17 @@ pub mod scan;
 pub mod score;
 pub mod types;
 
-pub use config::{default_model, DriftTuning, ScanConfig};
-pub use engine::{apply_correction, load_rules, redistill, run_scan, CorrectionRequest, ScanHandle};
+pub use config::{default_model, DriftTuning, ScanConfig, ScanMode};
+pub use engine::{
+    adjudicate_candidate, apply_correction, load_rules, redistill, run_scan,
+    Adjudication, AdjudicationRequest, CorrectionRequest, ScanHandle,
+};
 pub use events::{EventSink, Phase, ScanEvent};
 pub use report::{GroupSummary, Report, ReportEntry, SCHEMA_VERSION};
 pub use rules::Rule;
-pub use types::{Band, Candidate, Kind, OrphanStatus, PrivacyTier, ScopeCategory, Tier};
+pub use types::{
+    AutoHighBasis, Band, Candidate, Kind, OrphanStatus, PrivacyTier, ScopeCategory, Tier,
+};
 pub use types::TierSource;
 
 use thiserror::Error;

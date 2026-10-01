@@ -13,6 +13,7 @@
   import SettingsScreen from "./screens/Settings.svelte";
   import { onboarding, saveOnboarding, scan, toasts } from "./lib/stores";
   import type { View } from "./lib/stores";
+  import { bridge } from "./lib/bridge";
 
   /* ---------- which screen ---------- */
 
@@ -23,6 +24,18 @@
   };
 
   let view = $state<View>(startView());
+
+  /* The last persisted report belongs in the store from the start: after a
+   * relaunch, the Report and The Finder (and their nav links) must work
+   * without forcing a rescan — handing yesterday's findings to Finder is the
+   * whole point of the report. loadPersisted never overwrites a store that
+   * already has a report (a fresh scan finished in the meantime). */
+  $effect(() => {
+    if ($scan.report) return;
+    void bridge.getLastReport().then((r) => {
+      if (r) scan.loadPersisted(r);
+    });
+  });
 
   const onboarded = $derived($onboarding.done);
 

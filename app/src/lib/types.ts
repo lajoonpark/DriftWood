@@ -5,12 +5,16 @@ export type Tier = 1 | 2 | 3 | 4;
 
 export type TierSource =
   | "auto_high"
+  | "argued_auto_high"
   | "auto_low"
   | "rule"
   | "llm"
   | "llm_propagated"
   | "fallback"
-  | "never_flag";
+  | "heuristic"
+  | "never_flag"
+  | "system_floor"
+  | "adjudication";
 
 export type Kind = "file" | "folder" | "app";
 export type OrphanStatus = "orphaned" | "active" | "unknown";
@@ -100,6 +104,8 @@ export interface Candidate {
   score: number;
   score_components: ScoreComponents;
   band: Band;
+  /** Why auto-high promoted this candidate (argued auto-high). */
+  auto_high_basis?: "cache_root" | "orphaned_app_support" | "quantile_band";
 }
 
 export interface ReportEntry {
@@ -130,20 +136,103 @@ export interface Report {
   /** Set when the user pulled the scan ashore mid-crossing. Distinct from
    *  a cost-cap stop; the report is partial, unjudged items are fallback. */
   stopped_early?: boolean;
+  /** Stage 2 spend during the scan itself. */
+  llm_cost_usd?: number;
+  /** Cumulative spend of on-demand adjudications made after the scan.
+   *  Adjudication cost is never folded into llm_cost_usd — the scan total
+   *  stays the scan total — but the report total must include both. */
+  adjudication_cost_usd?: number;
 }
 
-/** What a bulk Finder hand-off actually did (from reveal_paths). */
-export interface RevealSummary {
-  windows: number;
-  items: number;
-  skipped_groups: number;
-  skipped_items: number;
+/* ---------- Finder hand-off ---------- */
+
+/** One selected finding as sent to the hand-off planner/executor. Tier and
+ *  personal-risk scope travel with the path so a container can be judged by
+ *  what it aggregates, not just by the leaves inside it. */
+export interface HandoffItem {
+  path: string;
+  size_bytes: number;
+  tier: Tier;
+  scope: ScopeCategory;
 }
+
+/** A path that could not be handed off, and why. Nothing is ever dropped
+ *  silently: every selected path ends up in a group or in a list like this. */
+export interface SkippedPath {
+  path: string;
+  reason: string;
+}
+
+/** One container folder the hand-off opens, with what Finder actually
+ *  reported as selected. `selected` is a Finder readback, not our request —
+ *  a mismatch is surfaced, never hidden, and `ok` comes only from that
+ *  readback, never from the mere absence of an error. */
+export interface RevealGroup {
+  folder: string;
+  findings: number;
+  finding_bytes: number;
+  /** Directory entry count of the container, null when it cannot be
+   *  counted cheaply — rendered as "total unknown", never as zero. */
+  total_in_folder: number | null;
+  requested: number;
+  selected: number;
+  /** Contains a Source-tier or high-personal-risk finding. */
+  tainted: boolean;
+  ok: boolean;
+  error?: string;
+}
+
+/** What a bulk Finder hand-off actually did (from reveal_paths), verified
+ *  by reading the selection count back out of Finder. */
+export interface RevealSummary {
+  groups: RevealGroup[];
+  skipped: SkippedPath[];
+  windows: number;
+  items_requested: number;
+  /** Finder-verified total across all groups. */
+  items_selected: number;
+}
+
+/** The pre-commit view of one container folder (from plan_handoff): the
+ *  exact grouping and rollup the execution will do, with counts, before
+ *  the user commits. */
+export interface PlanGroup {
+  folder: string;
+  findings: number;
+  finding_bytes: number;
+  total_in_folder: number | null;
+  tainted: boolean;
+}
+
+export interface HandoffPlan {
+  groups: PlanGroup[];
+  skipped: SkippedPath[];
+  windows: number;
+}
+
+/** Why a hand-off failed outright. `automation_denied` is macOS's refusal
+ *  of Finder control (TCC error -1743) — it gets its own calm explanation,
+ *  never a raw osascript error on a dead button. */
+export type RevealError =
+  | { kind: "automation_denied" }
+  | { kind: "script"; message: string };
+
+/** How much of the river to run. Mirrors core's `ScanMode`. */
+export type ScanMode = "express" | "standard" | "deep_read";
+
+export const SCAN_MODE_LABELS: Record<ScanMode, string> = {
+  express: "Express",
+  standard: "Standard",
+  deep_read: "Deep read",
+};
 
 export interface ScanConfig {
   scopes: ScopeCategory[];
   privacy_tier: PrivacyTier;
-  stage2: boolean;
+  /** Express: no AI. Standard: the middle band is argued. Deep read:
+   *  bands are advisory — every surviving candidate is argued (expensive;
+   *  clustering keeps it affordable). The system floor still wins. */
+  mode: ScanMode;
   model?: string;
   /** OpenRouter API key from app settings; stays local. */
   api_key?: string;

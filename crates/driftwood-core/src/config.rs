@@ -118,6 +118,27 @@ pub struct WalkCaps {
     pub mdls_batch_size: usize,
     /// Still-in-the-current window in days (notes §5: 3 weeks).
     pub recency_days: i64,
+    /// Per-invocation timeout for Spotlight helper processes (mdutil,
+    /// mdfind, mdls). A hung subprocess is treated as no data — recency is
+    /// a hard filter only on POSITIVE recency, so missing data never blocks
+    /// candidacy (plan §3.1.2); it only makes the report more honest about
+    /// what it could not see.
+    pub spotlight_timeout_secs: u64,
+    /// Timeout for enumerating one scope root's top level. A root whose
+    /// directory open never returns (TCC access pending, dead network
+    /// mount, unresponsive FUSE) is skipped with a warning instead of
+    /// freezing the whole scan — skip-and-count, never abort (edge §4.3),
+    /// which a bare blocking `read_dir` silently defeats.
+    pub root_timeout_secs: u64,
+    /// Timeout for sizing one folder. The blocked worker thread itself
+    /// cannot be killed; the engine stops dispatching new measurements
+    /// after `max_measure_timeouts` so a pathological disk leaks a bounded
+    /// number of threads rather than unbounded ones.
+    pub measure_timeout_secs: u64,
+    /// Give-up counter for folder measurements: after this many timed-out
+    /// measurements the scan stops walking and finishes with what it has,
+    /// warning the user that deep sizes are missing.
+    pub max_measure_timeouts: usize,
 }
 
 impl Default for WalkCaps {
@@ -129,6 +150,10 @@ impl Default for WalkCaps {
             max_walk_depth: 12,
             mdls_batch_size: 64,
             recency_days: 21,
+            spotlight_timeout_secs: 15,
+            root_timeout_secs: 30,
+            measure_timeout_secs: 120,
+            max_measure_timeouts: 8,
         }
     }
 }
@@ -159,14 +184,44 @@ impl DriftTuning {
     }
 }
 
+/// How much of the river to run. Replaces the old `stage2: bool`.
+///
+/// - `Express` — no Stage 2; heuristic band/rule tiers only, free and fast.
+/// - `Standard` — the quantile middle band is argued by the LLM; the
+///   extremes stay heuristic (auto-high/auto-low).
+/// - `DeepRead` — bands are ADVISORY: every surviving candidate that is
+///   not never-flagged, floored, or rule-pinned goes to Stage 2 and gets
+///   argued. Bands still inform batching order and the progress
+///   denominator; they must never determine a tier. The system/vendor
+///   floor still wins over the LLM — Deep read is exactly where the floor
+///   matters most and it does not bypass it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanMode {
+    Express,
+    Standard,
+    DeepRead,
+}
+
+impl ScanMode {
+    /// Does this mode send candidates to the LLM at all?
+    pub fn runs_llm(self) -> bool {
+        !matches!(self, ScanMode::Express)
+    }
+    /// Is this the every-item-argued mode?
+    pub fn is_deep(self) -> bool {
+        matches!(self, ScanMode::DeepRead)
+    }
+}
+
 /// Per-scan input for [`crate::engine::run_scan`].
 #[derive(Debug, Clone)]
 pub struct ScanConfig {
     /// Selected scope categories.
     pub scopes: Vec<ScopeCategory>,
     pub privacy_tier: PrivacyTier,
-    /// Run Stage 2 (LLM). When false, tiers come from bands/rules only.
-    pub stage2: bool,
+    /// How much of the river to run (replaces the old `stage2: bool`).
+    pub mode: ScanMode,
     /// OpenRouter model id. A setting, never a constant (Decision #2).
     pub model: String,
     /// OpenRouter API key. Read from the environment by the wrappers, never
@@ -192,7 +247,7 @@ impl Default for ScanConfig {
         Self {
             scopes: vec![ScopeCategory::Low],
             privacy_tier: PrivacyTier::Standard,
-            stage2: false,
+            mode: ScanMode::Express,
             model: default_model().to_string(),
             api_key: None,
             allow_non_zdr: false,
