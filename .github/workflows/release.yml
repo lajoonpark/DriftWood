@@ -146,6 +146,39 @@ jobs:
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "Built $(basename "$DMG") ($SHA)"
 
+      - name: Verify frontend assets were bundled
+        run: |
+          set -euo pipefail
+          # The Svelte UI loads these from /assets/... at runtime. They live in
+          # app/public/assets, which vite copies into dist and Tauri embeds into
+          # the binary. If that source directory is absent from the checkout
+          # (e.g. it is untracked), the build silently succeeds with a blank,
+          # asset-less app. Fail loudly instead.
+          ASSET_DIR="app/dist/assets"
+          required=(
+            paper-texture.png
+            snagged.png
+            river-horizontal.png
+            river-vertical.png
+            river-diagonal.png
+            stamp-driftwood.png
+            stamp-bottle.png
+            stamp-current.png
+            stamp-source.png
+          )
+          missing=0
+          for f in "${required[@]}"; do
+            if [ ! -f "$ASSET_DIR/$f" ]; then
+              echo "::error file=app/public/assets/$f::Required frontend asset '$f' was not bundled. Is app/public/assets committed and present in the checkout?"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Frontend assets are missing from the build. Refusing to publish a broken DMG."
+            exit 1
+          fi
+          echo "All ${#required[@]} required frontend assets are present in $ASSET_DIR."
+
       - name: Create or update draft release
         env:
           GH_TOKEN: ${{ github.token }}
