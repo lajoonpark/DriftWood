@@ -188,6 +188,12 @@ pub struct ReasonOutcome {
     pub cancelled: bool,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Display text of the last batch that failed (HTTP, parse, or a
+    /// well-formed answer with no usable judgments in it). Diagnostics for
+    /// single-item adjudication, where "the river did not answer" without
+    /// the underlying cause tells the user nothing actionable. `None` when
+    /// every dispatched batch settled cleanly.
+    pub last_batch_snag: Option<String>,
 }
 
 /// One dedup cluster: the item actually sent to the model, plus the ids
@@ -354,6 +360,7 @@ pub async fn reason_middle_band_with<T: client::Transport + 'static>(
     let mut total_completion_tokens = 0u64;
     let mut cap_hit = false;
     let mut cancelled = false;
+    let mut last_batch_snag: Option<String> = None;
 
     // Resume: load previously persisted judgments for this scan id. The
     // loader tolerates a truncated trailing line (a cancelled stream must
@@ -479,6 +486,7 @@ pub async fn reason_middle_band_with<T: client::Transport + 'static>(
                     // A batch task panicked — treat like any failed batch.
                     inflight -= 1;
                     settled += 1;
+                    last_batch_snag = Some(format!("batch task failed: {join_err}"));
                     sink.emit(ScanEvent::Warn {
                         message: format!("batch snagged: task failed: {join_err}"),
                     });
@@ -527,6 +535,7 @@ pub async fn reason_middle_band_with<T: client::Transport + 'static>(
                     sink.emit(ScanEvent::Warn {
                         message: format!("batch snagged: {e}"),
                     });
+                    last_batch_snag = Some(e.to_string());
                     for rep in &unit.reps {
                         fallback_ids.insert(rep.id.clone());
                     }
@@ -583,6 +592,7 @@ pub async fn reason_middle_band_with<T: client::Transport + 'static>(
         cancelled,
         prompt_tokens: total_prompt_tokens,
         completion_tokens: total_completion_tokens,
+        last_batch_snag,
     })
 }
 
@@ -695,6 +705,21 @@ async fn run_one_batch<T: client::Transport>(
                 };
                 match parsed {
                     Ok(judgments) => {
+                        // A clean parse with ZERO judgments is a snag, not a
+                        // success: the model answered in a shape we cannot
+                        // use (bare single object, an unknown wrapper key, a
+                        // string tier…). Retrying is honest (the model may
+                        // comply next attempt), and the raw answer must be
+                        // surfaced — an empty "success" used to persist
+                        // nothing and report only "the river did not answer"
+                        // with no cause (issue #1: "Ask the river").
+                        if judgments.is_empty() && !resp.content.trim().is_empty() {
+                            last_err = Some(DriftError::Reason(format!(
+                                "the model's answer had no usable judgments: {}",
+                                truncate(&resp.content, 400)
+                            )));
+                            continue; // retry
+                        }
                         persist_batch(scan_id_from(persist_path.as_deref()), &judgments, persist_path.as_deref());
                         return (
                             batch_no,
@@ -973,6 +998,53 @@ mod tests {
         assert!(!bodies[0].contains(crate::reason::prompt::SYSTEM_PROMPT));
         assert!(out.judgments.contains_key("a"));
         assert!((out.total_cost_usd - 0.002).abs() < 1e-9);
+    }
+
+    /// Issue #1: a model answer that is valid JSON but has NO usable
+    /// judgment in it must not count as a silent success. It retries, then
+    /// surfaces as a fallback with the raw answer carried in
+    /// `last_batch_snag` (adjudication puts it in the user-facing error).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_usable_judgment_answer_snags_with_raw_content() {
+        // Valid JSON, but nothing in it parses as a judgment.
+        let transport = Arc::new(OkTransport {
+            content: r#"{"hello":"world"}"#.into(),
+            cost: 0.001,
+        });
+        let cfg = Reasoning {
+            batch_size: 1,
+            retries: 1,
+            ..Reasoning::default()
+        };
+        let out = reason_middle_band_with(
+            vec![candidate_at("/w1", "a", 50.0)],
+            PrivacyTier::Minimal,
+            &cfg,
+            "m",
+            "k",
+            true,
+            "test-empty-answer",
+            &[],
+            sink(),
+            Arc::new(AtomicBool::new(false)),
+            transport,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(out.judgments.is_empty(), "no judgment may appear");
+        assert!(out.fallback_ids.contains("a"), "the item falls back");
+        let snag = out.last_batch_snag.expect("snag must carry the cause");
+        assert!(
+            snag.contains("no usable judgments"),
+            "cause must name the problem: {snag}"
+        );
+        assert!(
+            snag.contains("\"hello\":\"world\""),
+            "the raw answer must be surfaced for diagnosis: {snag}"
+        );
     }
 
     /// `None` keeps the standard prompt — existing scan behavior unchanged.

@@ -354,11 +354,40 @@ fn truncate_str(s: &str, n: usize) -> &str {
     }
 }
 
+/// Does this JSON value look like one judgment object? Used to recognize
+/// shapes the schema didn't ask for: a bare single judgment (common when
+/// the batch holds exactly one item) and unknown wrapper keys.
+fn looks_like_judgment(v: &serde_json::Value) -> bool {
+    v.as_object()
+        .map(|o| {
+            o.get("id").map(|i| i.is_string()).unwrap_or(false)
+                && o.get("tier").is_some()
+        })
+        .unwrap_or(false)
+}
+
+/// Read the tier off one judgment object. The schema says an integer
+/// 1..=4, but models occasionally answer `"tier": "3"` or `"tier": 3.0` —
+/// accept those; anything outside 1..=4 stays unusable.
+fn tier_of(item: &serde_json::Value) -> Option<u8> {
+    let t = item.get("tier")?;
+    let n = t
+        .as_u64()
+        .or_else(|| t.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as u64))
+        .or_else(|| t.as_str().and_then(|s| s.trim().parse::<u64>().ok()))?;
+    if (1..=4).contains(&n) {
+        Some(n as u8)
+    } else {
+        None
+    }
+}
+
 /// Parse the model's content into judgments. Tolerates the model wrapping
-/// the array in an object ("items"/"results") or code fences. Unknown ids,
-/// invalid tiers, or non-object entries are skipped by the caller via
-/// `Err`-per-item semantics: this returns whatever parsed cleanly plus the
-/// ids it saw.
+/// the array in an object ("items"/"results"), a bare single judgment
+/// object, an unknown wrapper key holding a judgment-shaped array, or code
+/// fences. Unknown ids, invalid tiers, or non-object entries are skipped by
+/// the caller via `Err`-per-item semantics: this returns whatever parsed
+/// cleanly plus the ids it saw.
 pub fn parse_judgments(content: &str) -> Result<Vec<LlmJudgment>> {
     let trimmed = content.trim();
     let trimmed = trimmed
@@ -376,13 +405,33 @@ pub fn parse_judgments(content: &str) -> Result<Vec<LlmJudgment>> {
 
     let items: Vec<&serde_json::Value> = match &value {
         serde_json::Value::Array(items) => items.iter().collect(),
-        serde_json::Value::Object(obj) => obj
-            .get("items")
-            .or_else(|| obj.get("results"))
-            .or_else(|| obj.get("judgments"))
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().collect())
-            .unwrap_or_default(),
+        serde_json::Value::Object(obj) => {
+            let known = obj
+                .get("items")
+                .or_else(|| obj.get("results"))
+                .or_else(|| obj.get("judgments"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().collect::<Vec<_>>());
+            if let Some(items) = known {
+                items
+            } else if looks_like_judgment(&value) {
+                // One-item batch: several models drop the requested array
+                // and answer with the single judgment object itself.
+                vec![&value]
+            } else {
+                // Unrecognized wrapper ("verdicts", "output", …): accept the
+                // first top-level array whose entries look like judgments.
+                obj.values()
+                    .find(|v| {
+                        v.as_array().is_some_and(|a| {
+                            !a.is_empty() && a.iter().any(looks_like_judgment)
+                        })
+                    })
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().collect())
+                    .unwrap_or_default()
+            }
+        }
         _ => vec![],
     };
 
@@ -391,9 +440,8 @@ pub fn parse_judgments(content: &str) -> Result<Vec<LlmJudgment>> {
         let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) else {
             continue;
         };
-        let tier = match item.get("tier").and_then(|v| v.as_u64()) {
-            Some(t) if (1..=4).contains(&t) => t as u8,
-            _ => continue,
+        let Some(tier) = tier_of(item) else {
+            continue;
         };
         let confidence = item
             .get("confidence")
@@ -505,6 +553,55 @@ mod tests {
         let j = parse_judgments(mixed).unwrap();
         assert_eq!(j.len(), 1);
         assert_eq!(j[0].id, "ok");
+    }
+
+    /// Issue #1 ("Ask the river not working"): one-item batches used to
+    /// parse to ZERO judgments when the model dropped the requested array
+    /// and answered with the bare judgment object — a clean parse, an
+    /// empty persist file, and only "the river did not answer" as symptom.
+    #[test]
+    fn parse_judgments_bare_single_object() {
+        let content =
+            r#"{"id":"c-a1b2c3d4e5f60718","tier":2,"confidence":0.8,"summary":"s","reasoning":"r"}"#;
+        let j = parse_judgments(content).unwrap();
+        assert_eq!(j.len(), 1);
+        assert_eq!(j[0].id, "c-a1b2c3d4e5f60718");
+        assert_eq!(j[0].tier, 2);
+    }
+
+    /// Same failure family: unknown wrapper keys ("verdicts", "output"…).
+    #[test]
+    fn parse_judgments_unknown_wrapper_key() {
+        let content = r#"{"verdicts":[{"id":"a","tier":3,"confidence":0.5,"summary":"","reasoning":""}]}"#;
+        let j = parse_judgments(content).unwrap();
+        assert_eq!(j.len(), 1);
+        assert_eq!(j[0].tier, 3);
+    }
+
+    /// Models occasionally emit the tier as a string or float.
+    #[test]
+    fn parse_judgments_string_and_float_tiers() {
+        let as_string = r#"[{"id":"a","tier":"3","confidence":0.5,"summary":"","reasoning":""}]"#;
+        assert_eq!(parse_judgments(as_string).unwrap()[0].tier, 3);
+        let as_float = r#"[{"id":"a","tier":4.0,"confidence":0.5,"summary":"","reasoning":""}]"#;
+        assert_eq!(parse_judgments(as_float).unwrap()[0].tier, 4);
+        // out of range stays unusable in every encoding
+        let bad = r#"[{"id":"a","tier":"9","confidence":0.5,"summary":"","reasoning":""}]"#;
+        assert!(parse_judgments(bad).unwrap().is_empty());
+    }
+
+    /// A bare single judgment wins over the unknown-wrapper scan (it IS a
+    /// judgment), and a non-judgment object still parses to empty.
+    #[test]
+    fn parse_judgments_shape_precedence() {
+        let single = r#"{"id":"a","tier":1,"confidence":0.5,"summary":"","reasoning":""}"#;
+        assert_eq!(parse_judgments(single).unwrap().len(), 1);
+        let noise = r#"{"hello":"world"}"#;
+        assert!(parse_judgments(noise).unwrap().is_empty());
+        // known keys keep precedence over a bare-object fallback
+        let both =
+            r#"{"items":[{"id":"a","tier":2,"confidence":0.5,"summary":"","reasoning":""}]}"#;
+        assert_eq!(parse_judgments(both).unwrap()[0].id, "a");
     }
 
     #[test]

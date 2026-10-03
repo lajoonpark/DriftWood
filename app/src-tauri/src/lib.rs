@@ -881,17 +881,44 @@ fn open_automation_settings() {
 
 /// Scan options as sent by the frontend. Anything the shell does not send
 /// (rules, walk caps, weights) keeps the core defaults.
+///
+/// `mode` is the v1.4 shape (express / standard / deep_read, matching
+/// core's snake_case `ScanMode`). The pre-1.4 `stage2` boolean is still
+/// accepted and mapped (true → Standard, false → Express) so a stale
+/// cached frontend bundle can never wedge the scan command again — that
+/// exact mismatch was issue #2 ("invalid args `config` for command
+/// `start_scan`: missing field `stage2`").
 #[derive(Debug, Deserialize)]
 struct ScanConfigDto {
     scopes: Vec<ScopeCategory>,
     privacy_tier: PrivacyTier,
-    stage2: bool,
+    #[serde(default)]
+    mode: Option<driftwood_core::ScanMode>,
+    /// Legacy pre-1.4 field, kept only for tolerance of an older frontend.
+    #[serde(default, skip_serializing)]
+    stage2: Option<bool>,
+    #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
     api_key: Option<String>,
+    #[serde(default)]
     cost_cap_usd: Option<f64>,
     /// Danger zone: when true, Stage-2 calls are not restricted to
     /// zero-data-retention providers. Opt-in only; default stays protected.
+    #[serde(default)]
     allow_non_zdr: Option<bool>,
+}
+
+impl ScanConfigDto {
+    /// Resolve how much of the river to run: an explicit `mode` wins; the
+    /// legacy `stage2` boolean is the fallback; the default is Standard —
+    /// the same default the settings store ships.
+    fn resolved_mode(&self) -> driftwood_core::ScanMode {
+        self.mode.or_else(|| {
+            self.stage2
+                .map(|b| if b { driftwood_core::ScanMode::Standard } else { driftwood_core::ScanMode::Express })
+        }).unwrap_or(driftwood_core::ScanMode::Standard)
+    }
 }
 
 /// Handle of the currently running scan, so `cancel_scan` can reach it.
@@ -928,6 +955,9 @@ async fn start_scan(
             tuning.reasoning.cost_cap_usd = cap;
         }
     }
+    // Resolve the mode before any field of `config` is moved out.
+    let mode = config.resolved_mode();
+
     // The key comes from the app settings (frontend) or the environment.
     let api_key = config
         .api_key
@@ -942,11 +972,7 @@ async fn start_scan(
     let core_config = ScanConfig {
         scopes: config.scopes,
         privacy_tier: config.privacy_tier,
-        mode: if config.stage2 {
-            driftwood_core::ScanMode::Standard
-        } else {
-            driftwood_core::ScanMode::Express
-        },
+        mode,
         model: config
             .model
             .map(|m| m.trim().to_string())
@@ -1164,6 +1190,40 @@ pub fn run() {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Issue #2: the v1.4 frontend sends `mode` ("express" | "standard" |
+    /// "deep_read"), not the old `stage2` boolean — the strict `stage2`
+    /// field rejected every scan ("missing field `stage2`"). The DTO must
+    /// accept the new shape, the legacy shape, and neither.
+    #[test]
+    fn scan_config_dto_accepts_mode_and_legacy_stage2() {
+        let v: ScanConfigDto = serde_json::from_str(&format!(
+            r#"{{"scopes":["low"],"privacy_tier":"standard","mode":"deep_read"}}"#
+        ))
+        .unwrap();
+        assert!(matches!(v.resolved_mode(), driftwood_core::ScanMode::DeepRead));
+
+        let v: ScanConfigDto = serde_json::from_str(&format!(
+            r#"{{"scopes":["low"],"privacy_tier":"standard","mode":"express"}}"#
+        ))
+        .unwrap();
+        assert!(matches!(v.resolved_mode(), driftwood_core::ScanMode::Express));
+
+        // Legacy pre-1.4 shape still maps.
+        let v: ScanConfigDto =
+            serde_json::from_str(r#"{"scopes":["low"],"privacy_tier":"standard","stage2":false}"#)
+                .unwrap();
+        assert!(matches!(v.resolved_mode(), driftwood_core::ScanMode::Express));
+        let v: ScanConfigDto =
+            serde_json::from_str(r#"{"scopes":["low"],"privacy_tier":"standard","stage2":true}"#)
+                .unwrap();
+        assert!(matches!(v.resolved_mode(), driftwood_core::ScanMode::Standard));
+
+        // Neither field → Standard, the settings-store default.
+        let v: ScanConfigDto =
+            serde_json::from_str(r#"{"scopes":["low"],"privacy_tier":"standard"}"#).unwrap();
+        assert!(matches!(v.resolved_mode(), driftwood_core::ScanMode::Standard));
+    }
 
     #[test]
     fn report_shape_matches_frontend_contract() {

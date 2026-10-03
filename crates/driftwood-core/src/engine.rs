@@ -1531,10 +1531,34 @@ pub async fn adjudicate_candidate(request: AdjudicationRequest, sink: Arc<dyn Ev
     )
     .await?;
 
-    let judgment = outcome
-        .judgments
-        .get(&candidate.id)
-        .ok_or_else(|| DriftError::Reason("the river did not answer for this item".into()))?;
+    let judgment = outcome.judgments.get(&candidate.id).cloned().or_else(|| {
+        // Single-item adjudication: if the river answered exactly one
+        // judgment but echoed a different id, it still judged the only
+        // candidate it was asked about — keep it, honestly noted, rather
+        // than reporting silence (issue #1: several models fumble long
+        // opaque ids on one-item batches).
+        if outcome.judgments.len() == 1 {
+            let (echoed_id, j) = outcome.judgments.iter().next()?;
+            sink.emit(ScanEvent::notice(format!(
+                "the river answered for id {echoed_id} instead of {} — kept: this was a one-item adjudication",
+                candidate.id
+            )));
+            Some(j.clone())
+        } else {
+            None
+        }
+    }).ok_or_else(|| {
+        // Say WHY the river stayed silent when a batch snagged: a bare
+        // "did not answer" with the real cause hidden in a warn event is
+        // not actionable (issue #1). When nothing failed and the answer
+        // simply had no judgment for this id, keep the plain message.
+        match &outcome.last_batch_snag {
+            Some(snag) => DriftError::Reason(format!(
+                "the river did not answer for this item — {snag}"
+            )),
+            None => DriftError::Reason("the river did not answer for this item".into()),
+        }
+    })?;
     let llm_tier = Tier::try_from(judgment.tier)
         .map_err(|e| DriftError::Reason(format!("unusable tier from the river: {e}")))?;
 
