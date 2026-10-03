@@ -243,7 +243,7 @@ pub fn tier_for_candidate(candidate: &Candidate) -> Tier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Band, Kind, OrphanStatus, PrivacyTier, ScoreComponents, TierSource};
+    use crate::types::{Band, FieldState, Kind, OrphanStatus, PrivacyTier, ScoreComponents, TierSource};
 
     fn entry(path: &str, cat: ScopeCategory, bytes: u64, score: f64) -> ReportEntry {
         ReportEntry {
@@ -257,6 +257,13 @@ mod tests {
                 last_used_from_spotlight: false,
                 modified_date: None,
                 created_date: None,
+                size_state: FieldState::Known,
+                children_state: FieldState::Unavailable,
+                modified_state: FieldState::Unavailable,
+                created_state: FieldState::Unavailable,
+                last_used_state: FieldState::Unavailable,
+                readable: true,
+                read_error: None,
                 orphan_status: OrphanStatus::Unknown,
                 scope_category: cat,
                 score,

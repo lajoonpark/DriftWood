@@ -2,7 +2,7 @@
   import { slide } from "svelte/transition";
   import Stamp from "../components/Stamp.svelte";
   import { bridge } from "../lib/bridge";
-  import { confidenceWord, formatBytes, relDate, truncateMiddle } from "../lib/format";
+  import { confidenceWord, lastUsedLabel, modifiedLabel, sizeLabel, truncateMiddle } from "../lib/format";
   import { toast, appSettings, scan } from "../lib/stores";
   import { TIER_NAMES, type ReportEntry, type Tier } from "../lib/types";
 
@@ -41,6 +41,7 @@
     never_flag: { text: "protected — never flagged" },
     system_floor: { text: "system floor — DriftWood declines to opine", warn: true },
     adjudication: { text: "second opinion — argued on request, not applied" },
+    not_inspected: { text: "not inspected — kept for safety", warn: true },
   };
 
   const ORPHAN_WORDS = {
@@ -113,9 +114,13 @@
     <p class="summary">{entry.summary}</p>
 
     <div class="meta">
-      <span>{formatBytes(c.size_bytes)}</span>
+      <span>{sizeLabel(c)}</span>
       <span class="sep">·</span>
-      <span>last used {relDate(c.last_used_date)}</span>
+      <span>{lastUsedLabel(c)}</span>
+      {#if modifiedLabel(c)}
+        <span class="sep">·</span>
+        <span>{modifiedLabel(c)}</span>
+      {/if}
       <span class="sep">·</span>
       <span>{ORPHAN_WORDS[c.orphan_status]}</span>
       {#if entry.reasoning}
@@ -135,9 +140,23 @@
       {/if}
       <!-- Adjudication is available on EVERY entry, regardless of tier or
            tier_source — including auto_high, rule, and never_flag, which
-           have no reasoning dropdown to hang it on. -->
-      <button class="ask" onclick={askRiver} disabled={adjBusy}>
-        {adjBusy ? "asking the river…" : adj ? "ask again" : "Ask the river"}
+           have no reasoning dropdown to hang it on. Unreadable items are
+           the exception: they are never sent to the model. -->
+      <button
+        class="ask"
+        onclick={askRiver}
+        disabled={adjBusy || c.readable === false}
+        title={c.readable === false
+          ? "This item could not be read, so it is never sent to the model."
+          : ""}
+      >
+        {c.readable === false
+          ? "not inspectable"
+          : adjBusy
+            ? "asking the river…"
+            : adj
+              ? "ask again"
+              : "Ask the river"}
       </button>
     </div>
 
@@ -204,7 +223,7 @@
     </div>
   </div>
 
-  <div class="size num">{formatBytes(c.size_bytes)}</div>
+  <div class="size num">{sizeLabel(c)}</div>
 </article>
 
 <style>

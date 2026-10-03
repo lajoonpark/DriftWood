@@ -33,19 +33,11 @@ impl InstalledApps {
     }
 }
 
-/// System/OS-vendor owner patterns. One shared list with two consumers:
-/// never-orphan detection (this module) and the tier-3 system floor
-/// (`engine.rs`). Keeping it single-source is deliberate — two parallel
-/// lists drift, and the confident-wrong-answer class comes back.
-///
-/// WHY these entries and not others: the criterion is NOT "installed" and
-/// NOT "big vendor". It is: **the vendor owns the OS or the whole suite,
-/// so this folder may be load-bearing for things outside that one
-/// application** (system services, cross-app shared state). Apple owns
-/// macOS. Microsoft qualifies — Office/Teams/OneDrive share state across
-/// apps. An ordinary App Store app does NOT: its folders only serve
-/// itself, so the LLM is free to judge them.
-pub const SYSTEM_VENDOR_PATTERNS: &[&str] = &["com.apple.*", "com.microsoft.*"];
+/// System/OS-vendor owner patterns. The patterns themselves live in the
+/// single editable `crate::system_paths` module; this alias keeps the old
+/// name working for the system floor.
+pub use crate::system_paths::SUITE_VENDOR_PATTERNS;
+use crate::system_paths::SYSTEM_OWNER_PATTERNS;
 
 /// Default never-orphan entries, EXCLUDING the system-vendor patterns
 /// above (those are merged in by [`load_never_orphan_list`], which is the
@@ -57,11 +49,14 @@ pub const DEFAULT_NEVER_ORPHAN: &[&str] = &[
     "apple",
     // known shared / system dirs
     "MobileSync",
+    "MobileDevice",
     "SyncServices",
     "CloudDocs",
     "iLifeMediaBrowser",
     "Knowledge",
     "CallHistory",
+    "CallHistoryDB",
+    "CallHistoryTransactions",
     "AddressBook",
     "FaceTime",
     "GameKit",
@@ -179,8 +174,9 @@ pub fn fuzzy_match(candidate: &str, name: &str) -> bool {
 /// against this list, so a vendor added to the memory-folder file is
 /// respected by both or neither.
 pub fn load_never_orphan_list(memory_dir: &Path) -> Vec<String> {
-    let mut list: Vec<String> = SYSTEM_VENDOR_PATTERNS
+    let mut list: Vec<String> = SYSTEM_OWNER_PATTERNS
         .iter()
+        .chain(SUITE_VENDOR_PATTERNS.iter())
         .chain(DEFAULT_NEVER_ORPHAN.iter())
         .map(|s| s.to_string())
         .collect();
@@ -225,51 +221,61 @@ pub fn is_never_orphan(normalized_name: &str, never_list: &[String]) -> bool {
 /// Classify an app-data folder name against installed apps.
 /// Folder names like `com.vendor.app` (reverse-DNS) and `Google Chrome`
 /// (plain) are both handled. Generic names return `Unknown`.
+///
+/// `Orphaned` is reserved for POSITIVE evidence that a former owner is
+/// gone: a reverse-DNS folder name is a left-behind bundle identifier, so
+/// a reverse-DNS name with no matching installed app is orphaned. A plain
+/// folder name proves nothing — "no matching app found" alone is NOT
+/// evidence, and returns `Unknown`. Anything OS-owned (Apple patterns and
+/// system directories) is never orphaned.
 pub fn classify_orphan(folder_name: &str, apps: &InstalledApps, never_list: &[String]) -> OrphanStatus {
     let normalized = normalize_name(folder_name);
 
     if is_never_orphan(&normalized, never_list) {
         return OrphanStatus::Active; // protected: never orphaned
     }
+    // OS-owned daemon/service directories are never a user app's leftovers.
+    if crate::system_paths::matching_system_owner(folder_name).is_some() {
+        return OrphanStatus::Active;
+    }
 
-    if looks_reverse_dns(&normalized) {
-        // Exact bundle-id match → active.
-        if apps.bundle_ids.contains(&normalized) {
-            return OrphanStatus::Active;
-        }
-        // Vendor-prefix match → active (protect shared vendor folders).
-        let parts: Vec<&str> = normalized.split('.').collect();
-        if parts.len() >= 2 {
-            let vendor = format!("{}.{}", parts[0], parts[1]);
-            if apps.vendor_prefixes.contains(&vendor) {
-                return OrphanStatus::Active;
-            }
-        }
-        // Last component fuzzy-matches an app name → active.
-        let last = parts.last().copied().unwrap_or(&normalized).to_string();
-        if last.len() >= 3
-            && apps.names.iter().any(|n| fuzzy_match(&last, n))
+    // Only a bundle-identifier-shaped name is evidence an app once owned
+    // this folder. A plain name says nothing about a former install, but a
+    // plain name that DOES match an installed app is still Active.
+    if !looks_reverse_dns(&normalized) {
+        if !is_generic(&normalized)
+            && apps
+                .names
+                .iter()
+                .chain(apps.bundle_dirs.iter())
+                .any(|n| fuzzy_match(&normalized, n))
         {
             return OrphanStatus::Active;
         }
-        if is_generic(&last) {
-            return OrphanStatus::Unknown;
-        }
-        return OrphanStatus::Orphaned;
-    }
-
-    // Plain name.
-    if is_generic(&normalized) {
         return OrphanStatus::Unknown;
     }
-    if apps
-        .names
-        .iter()
-        .chain(apps.bundle_dirs.iter())
-        .any(|n| fuzzy_match(&normalized, n))
-    {
+
+    // Exact bundle-id match → active.
+    if apps.bundle_ids.contains(&normalized) {
         return OrphanStatus::Active;
     }
+    // Vendor-prefix match → active (protect shared vendor folders).
+    let parts: Vec<&str> = normalized.split('.').collect();
+    if parts.len() >= 2 {
+        let vendor = format!("{}.{}", parts[0], parts[1]);
+        if apps.vendor_prefixes.contains(&vendor) {
+            return OrphanStatus::Active;
+        }
+    }
+    // Last component fuzzy-matches an app name → active.
+    let last = parts.last().copied().unwrap_or(&normalized).to_string();
+    if last.len() >= 3 && apps.names.iter().any(|n| fuzzy_match(&last, n)) {
+        return OrphanStatus::Active;
+    }
+    if is_generic(&last) {
+        return OrphanStatus::Unknown;
+    }
+    // A reverse-DNS name with no match is a leftover bundle identifier.
     OrphanStatus::Orphaned
 }
 
@@ -313,7 +319,8 @@ mod tests {
             ("com.apple.sharedfilelist", Active),
             // plain names
             ("Google Chrome", Active),
-            ("MyOldDeletedGame", Orphaned),
+            // A plain name with no match is NOT evidence of orphanhood.
+            ("MyOldDeletedGame", Unknown),
             ("Cache", Unknown),
             ("Data", Unknown),
             ("ab", Unknown),

@@ -21,7 +21,8 @@ use crate::rules::{self, Rule, RuleSource};
 use crate::scan::{hard_rules, orphan, scope, spotlight};
 use crate::score::{self, banding, ScoreInput};
 use crate::types::{
-    AutoHighBasis, Band, Candidate, Kind, KindStats, OrphanStatus, PrivacyTier, Tier, TierSource,
+    AutoHighBasis, Band, Candidate, FieldState, Kind, KindStats, OrphanStatus, PrivacyTier, Tier,
+    TierSource,
 };
 use crate::{DriftError, Result};
 
@@ -120,6 +121,75 @@ impl Drop for ScanLock {
     }
 }
 
+/// One measured candidate unit: the value plus its tri-state read state and
+/// the per-item `readable` flag. A failed read is NEVER a zero — the size
+/// stays 0 only as a placeholder that no consumer may trust while the state
+/// says otherwise.
+#[derive(Debug, Clone)]
+struct Measure {
+    size: u64,
+    stats: Option<KindStats>,
+    size_state: FieldState,
+    children_state: FieldState,
+    readable: bool,
+    error: Option<String>,
+}
+
+impl Measure {
+    fn known(size: u64, stats: Option<KindStats>) -> Self {
+        let children_state = if stats.is_some() {
+            FieldState::Known
+        } else {
+            FieldState::Unavailable // files have no children
+        };
+        Self {
+            size,
+            stats,
+            size_state: FieldState::Known,
+            children_state,
+            readable: true,
+            error: None,
+        }
+    }
+
+    /// A read that failed outright (permission denied, I/O, never measured).
+    fn unreadable(reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        Self {
+            size: 0,
+            stats: None,
+            size_state: FieldState::Error(reason.clone()),
+            children_state: FieldState::Error(reason.clone()),
+            readable: false,
+            error: Some(reason),
+        }
+    }
+
+    /// A read that succeeded but skipped entries mid-walk: the size is a
+    /// floor, so the item is held back from deletion advice.
+    fn partial(size: u64, stats: Option<KindStats>, reason: String) -> Self {
+        Self {
+            size,
+            stats,
+            size_state: FieldState::Known,
+            children_state: FieldState::Known,
+            readable: false,
+            error: Some(reason),
+        }
+    }
+}
+
+/// The sizing phase's per-folder outcome.
+enum MeasureOutcome {
+    Done(Measure),
+    /// The blocking walk panicked or the task failed — one folder, not
+    /// a pattern; does not count toward the give-up counter.
+    Failed(String),
+    /// Never answered within `measure_timeout_secs`. The thread leaks;
+    /// the counter decides when to stop measuring entirely.
+    TimedOut,
+}
+
 pub async fn run_scan(
     config: ScanConfig,
     sink: Arc<dyn EventSink>,
@@ -149,6 +219,19 @@ pub async fn run_scan(
     }
 
     let mut warns: Vec<ReportWarning> = Vec::new();
+
+    // Full Disk Access probe, once, up front. Without it TCC-protected
+    // folders cannot be listed or sized; the report says so plainly and the
+    // affected items are marked not-inspected rather than shown as 0 B.
+    if crate::scan::fda::check(&home) == crate::scan::fda::FullDiskAccess::Denied {
+        let msg = "Full Disk Access is not granted — protected folders (Mail, Messages, Safari, and some Application Support services) cannot be inspected. They are listed as not inspected and kept at Source.".to_string();
+        sink.emit(ScanEvent::warn(msg.clone()));
+        warns.push(ReportWarning {
+            kind: "full_disk_access".into(),
+            message: msg,
+        });
+    }
+
     let mut units: Vec<scope::Unit> = Vec::new();
     for root in &roots {
         if handle.is_cancelled() {
@@ -262,19 +345,35 @@ pub async fn run_scan(
     let last_used = spotlight::query_last_used(&unit_paths, tuning.walk.mdls_batch_size, spotlight_timeout).await;
 
     // File dates via metadata (mtime is never "last used"; created date is
-    // the Downloads exception).
+    // the Downloads exception). A failed stat is recorded as an error state
+    // for both dates instead of being silently absent.
     let mut modified: HashMap<PathBuf, chrono::DateTime<Utc>> = HashMap::new();
     let mut created: HashMap<PathBuf, chrono::DateTime<Utc>> = HashMap::new();
+    let mut stat_error: HashMap<PathBuf, String> = HashMap::new();
     for p in &unit_paths {
-        if let Ok(meta) = std::fs::symlink_metadata(p) {
-            if let Ok(t) = meta.modified() {
-                modified.insert(p.clone(), t.into());
+        match std::fs::symlink_metadata(p) {
+            Ok(meta) => {
+                if let Ok(t) = meta.modified() {
+                    modified.insert(p.clone(), t.into());
+                }
+                if let Ok(t) = meta.created() {
+                    created.insert(p.clone(), t.into());
+                }
             }
-            if let Ok(t) = meta.created() {
-                created.insert(p.clone(), t.into());
+            Err(e) => {
+                stat_error.insert(p.clone(), crate::scan::walk::io_reason(&e));
             }
         }
     }
+    let date_state = |map: &HashMap<PathBuf, chrono::DateTime<Utc>>, p: &Path| -> FieldState {
+        if map.contains_key(p) {
+            FieldState::Known
+        } else if let Some(reason) = stat_error.get(p) {
+            FieldState::Error(reason.clone())
+        } else {
+            FieldState::Unavailable
+        }
+    };
 
     // ---- Phase: Filtering (hard rules + orphans) ---------------------------
     sink.emit(ScanEvent::Phase {
@@ -348,6 +447,7 @@ pub async fn run_scan(
         tokio::task::spawn_blocking(move || orphan::enumerate_installed_apps(&home_for_apps, 4000)),
     )
     .await;
+    let mut apps_known = true;
     let installed = match app_snapshot {
         Ok(Ok(apps)) => apps,
         Ok(Err(e)) => return Err(DriftError::Scan(format!("installed-app snapshot failed: {e}"))),
@@ -358,13 +458,16 @@ pub async fn run_scan(
                 kind: "app_snapshot_timeout".into(),
                 message: msg.to_string(),
             });
+            apps_known = false;
             Default::default()
         }
     };
     let never_orphan = orphan::load_never_orphan_list(&crate::paths::memory_dir());
     let mut orphan_status: HashMap<PathBuf, OrphanStatus> = HashMap::new();
     for unit in &survivors {
-        let status = if unit.kind == Kind::File {
+        // Blind orphan detection must stay silent: with no app snapshot,
+        // "no matching app" is not evidence of anything.
+        let status = if unit.kind == Kind::File || !apps_known {
             OrphanStatus::Unknown
         } else {
             let name = unit
@@ -385,28 +488,7 @@ pub async fn run_scan(
     // worker thread itself cannot be killed — `max_measure_timeouts` caps
     // how many are leaked before the scan stops measuring and finishes
     // with honest partial sizes.
-    enum MeasureOutcome {
-        Done(u64, Option<KindStats>),
-        /// The blocking walk panicked or the task failed — one folder, not
-        /// a pattern; does not count toward the give-up counter.
-        Failed(String),
-        /// Never answered within `measure_timeout_secs`. The thread leaks;
-        /// the counter decides when to stop measuring entirely.
-        TimedOut,
-    }
-
-    let mut measures: HashMap<PathBuf, (u64, Option<KindStats>)> = HashMap::new();
-    // Unanswered folders still get an entry: zero size (we claim nothing)
-    // with `truncated: true`, so the data model itself says the walk was
-    // incomplete rather than the folder being genuinely empty.
-    let unknown_measure = || {
-        Some(KindStats {
-            children: 0,
-            files: 0,
-            cache_like_ratio: 0.0,
-            truncated: true,
-        })
-    };
+    let mut measures: HashMap<PathBuf, Measure> = HashMap::new();
     let mut join = tokio::task::JoinSet::new();
     let max_concurrent = 8usize;
     let mut inflight = 0usize;
@@ -431,16 +513,31 @@ pub async fn run_scan(
         let is_file = unit.kind == Kind::File;
 
         if is_file {
-            if let Ok(meta) = std::fs::symlink_metadata(&path) {
-                let size = meta.len();
-                counters.files_searched.fetch_add(1, Ordering::Relaxed);
-                counters.bytes_searched.fetch_add(size, Ordering::Relaxed);
-                measures.insert(path, (size, None));
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) => {
+                    let size = meta.len();
+                    counters.files_searched.fetch_add(1, Ordering::Relaxed);
+                    counters.bytes_searched.fetch_add(size, Ordering::Relaxed);
+                    measures.insert(path, Measure::known(size, None));
+                }
+                Err(e) => {
+                    // A file we cannot stat is not a zero-byte file.
+                    let reason = crate::scan::walk::io_reason(&e);
+                    sink.emit(ScanEvent::warn(format!(
+                        "{} unreadable: {reason}",
+                        path.display()
+                    )));
+                    measures.insert(path, Measure::unreadable(reason));
+                }
             }
             continue;
         }
 
         if stopped_measuring {
+            measures.insert(
+                path.clone(),
+                Measure::unreadable("not measured before the scan stopped"),
+            );
             unmeasured.push(path);
             continue;
         }
@@ -450,11 +547,11 @@ pub async fn run_scan(
             Some(Ok((path, outcome))) => {
                 inflight -= 1;
                 match outcome {
-                    MeasureOutcome::Done(size, stats) => {
-                        measures.insert(path, (size, stats));
+                    MeasureOutcome::Done(m) => {
+                        measures.insert(path, m);
                     }
                     MeasureOutcome::Failed(e) => {
-                        measures.insert(path, (0, unknown_measure()));
+                        measures.insert(path, Measure::unreadable(format!("sizing failed: {e}")));
                         sink.emit(ScanEvent::warn(format!("sizing snagged: {e}")));
                     }
                     MeasureOutcome::TimedOut => {
@@ -463,7 +560,13 @@ pub async fn run_scan(
                             path.display(),
                             tuning.walk.measure_timeout_secs
                         )));
-                        measures.insert(path, (0, unknown_measure()));
+                        measures.insert(
+                            path,
+                            Measure::unreadable(format!(
+                                "no response in {}s",
+                                tuning.walk.measure_timeout_secs
+                            )),
+                        );
                         measure_timeouts += 1;
                     }
                 }
@@ -483,7 +586,10 @@ pub async fn run_scan(
                 kind: "measure_timeouts".into(),
                 message: msg,
             });
-            measures.insert(path.clone(), (0, unknown_measure()));
+            measures.insert(
+                path.clone(),
+                Measure::unreadable("the riverbed stopped responding"),
+            );
             unmeasured.push(path);
             continue;
         }
@@ -507,7 +613,18 @@ pub async fn run_scan(
                     cache_like_ratio: m.stats.cache_like_ratio,
                     truncated: m.stats.truncated,
                 };
-                MeasureOutcome::Done(m.bytes, Some(stats))
+                if let Some(reason) = m.error {
+                    // The root could not be opened: error, never "empty".
+                    MeasureOutcome::Done(Measure::unreadable(reason))
+                } else if m.skipped > 0 {
+                    MeasureOutcome::Done(Measure::partial(
+                        m.bytes,
+                        Some(stats),
+                        format!("partial read: {} unreadable entr{}", m.skipped, if m.skipped == 1 { "y" } else { "ies" }),
+                    ))
+                } else {
+                    MeasureOutcome::Done(Measure::known(m.bytes, Some(stats)))
+                }
             });
             match tokio::time::timeout(measure_timeout, inner).await {
                 Ok(Ok(outcome)) => (ret_path, outcome),
@@ -521,11 +638,11 @@ pub async fn run_scan(
     while let Some(done) = join.join_next().await {
         match done {
             Ok((path, outcome)) => match outcome {
-                MeasureOutcome::Done(size, stats) => {
-                    measures.insert(path, (size, stats));
+                MeasureOutcome::Done(m) => {
+                    measures.insert(path, m);
                 }
                 MeasureOutcome::Failed(e) => {
-                    measures.insert(path, (0, unknown_measure()));
+                    measures.insert(path, Measure::unreadable(format!("sizing failed: {e}")));
                     sink.emit(ScanEvent::warn(format!("sizing snagged: {e}")));
                 }
                 MeasureOutcome::TimedOut => {
@@ -534,7 +651,13 @@ pub async fn run_scan(
                         path.display(),
                         tuning.walk.measure_timeout_secs
                     )));
-                    measures.insert(path, (0, unknown_measure()));
+                    measures.insert(
+                        path,
+                        Measure::unreadable(format!(
+                            "no response in {}s",
+                            tuning.walk.measure_timeout_secs
+                        )),
+                    );
                 }
             },
             Err(e) => sink.emit(ScanEvent::warn(format!("sizing task failed: {e}"))),
@@ -542,7 +665,7 @@ pub async fn run_scan(
     }
     if !unmeasured.is_empty() {
         let msg = format!(
-            "{} folder(s) were not measured at all after the riverbed stopped responding — their sizes read as unknown",
+            "{} folder(s) were not measured at all after the riverbed stopped responding — their sizes are unknown, not zero",
             unmeasured.len()
         );
         sink.emit(ScanEvent::warn(msg.clone()));
@@ -561,11 +684,18 @@ pub async fn run_scan(
 
     let mut candidates: Vec<Candidate> = Vec::with_capacity(survivors.len());
     for (idx, unit) in survivors.iter().enumerate() {
-        let (size_bytes, stats) = measures
+        let measured = measures
             .get(&unit.path)
             .cloned()
-            .unwrap_or((0, None));
-        let kind_stats = stats.filter(|_| unit.kind != Kind::File);
+            .unwrap_or_else(|| Measure::unreadable("not measured"));
+        let size_bytes = measured.size;
+        let kind_stats = measured.stats.clone().filter(|_| unit.kind != Kind::File);
+        // Files have no children regardless of the measurement path.
+        let children_state = if unit.kind == Kind::File {
+            FieldState::Unavailable
+        } else {
+            measured.children_state.clone()
+        };
 
         let cache_like_ratio = match unit.kind {
             Kind::File => {
@@ -584,8 +714,10 @@ pub async fn run_scan(
             _ => kind_stats.as_ref().map(|s| s.cache_like_ratio).unwrap_or(0.0),
         };
 
-        // Age reference: Spotlight last-used, else modified, else created.
-        // The Downloads exception treats creation as meaningful.
+        // Age reference for scoring only: Spotlight last-used, else
+        // modified, else created. This is a drift heuristic — it is NOT
+        // presented to the model or the user as "last used" (the payload
+        // labels each date with the field it came from).
         let lu = last_used.get(&unit.path).copied().flatten();
         let age_ref = match lu {
             Some(t) => Some(t),
@@ -593,6 +725,16 @@ pub async fn run_scan(
         };
         let age_days = age_ref
             .map(|t| (now - t).num_days().max(0) as f64);
+
+        // A last-use date only exists when Spotlight recorded one. Without
+        // Spotlight the field is errored, never silently absent.
+        let last_used_state = if lu.is_some() {
+            FieldState::Known
+        } else if spotlight_ok {
+            FieldState::Unavailable
+        } else {
+            FieldState::Error("Spotlight indexing unavailable".into())
+        };
 
         // Depth relative to home (fallback: absolute component count).
         let depth = unit
@@ -628,6 +770,13 @@ pub async fn run_scan(
             last_used_from_spotlight: lu.is_some() && spotlight_ok,
             modified_date: modified.get(&unit.path).copied(),
             created_date: created.get(&unit.path).copied(),
+            size_state: measured.size_state.clone(),
+            children_state,
+            modified_state: date_state(&modified, &unit.path),
+            created_state: date_state(&created, &unit.path),
+            last_used_state,
+            readable: measured.readable,
+            read_error: measured.error.clone(),
             orphan_status: input.orphan_status,
             scope_category: unit.category,
             score: components.total(),
@@ -672,6 +821,17 @@ pub async fn run_scan(
     // ---- Local rules pin tiers before any LLM call (Phase 7) ---------------
     let mut pinned: HashMap<String, (Tier, String)> = HashMap::new(); // id → (tier, rule_id)
     let mut never_flagged: std::collections::HashSet<String> = Default::default();
+    // Unreadable items (sizing or listing failed, or was partial) are held
+    // at Source by code and never sent to the model: a failed read is not
+    // evidence about safety.
+    let not_inspected: std::collections::HashSet<String> = candidates
+        .iter()
+        .filter(|c| !c.readable)
+        .map(|c| c.id.clone())
+        .collect();
+    // OS-owned paths (Apple daemons/services): id → the matched pattern.
+    // Resolved before Stage 2; a match goes straight to Source.
+    let mut system_owned: HashMap<String, String> = HashMap::new();
     // System/vendor floor: id → the protection pattern that matched.
     let mut floored: HashMap<String, String> = HashMap::new();
     for c in &candidates {
@@ -679,6 +839,11 @@ pub async fn run_scan(
             || hard_rules::is_group_container(Path::new(&c.path), &home)
         {
             never_flagged.insert(c.id.clone());
+            continue;
+        }
+        // An unreadable item's metadata is a placeholder, not data: rules,
+        // floors, and the model must not reason from it.
+        if not_inspected.contains(&c.id) {
             continue;
         }
         let features = rules::extract_features(
@@ -692,9 +857,22 @@ pub async fn run_scan(
             .iter()
             .find(|r| rules::rule_matches(r, &features))
         {
-            // Precedence: user rule > floor. A user re-stamp distilled into
-            // a rule is the deliberate exception mechanism for the floor.
+            // Precedence: user rule > system-owned > floor. A user re-stamp
+            // distilled into a rule is the deliberate exception mechanism.
             pinned.insert(c.id.clone(), (rule.tier, rule.id.clone()));
+            continue;
+        }
+        let name = Path::new(&c.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // OS-owned hard rule (Apple daemons/services under ~/Library and
+        // com.apple.* anywhere): straight to Source, before any model call.
+        // The reason is the matched pattern.
+        if let Some(pattern) =
+            crate::system_paths::system_owned_for_path(Path::new(&c.path), &home)
+        {
+            system_owned.insert(c.id.clone(), pattern);
             continue;
         }
         // System/vendor floor: a folder whose owner is on the shared
@@ -704,15 +882,24 @@ pub async fn run_scan(
         // never see it, because floored at 3 the model could only confirm
         // 3 or push to 4, and paying for a foregone conclusion across
         // ~880 MB of vendor caches is waste.
-        let name = Path::new(&c.path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         if let Some(pattern) =
             orphan::matching_protected_pattern(&orphan::normalize_name(&name), &never_orphan)
         {
             floored.insert(c.id.clone(), pattern);
         }
+    }
+
+    if !system_owned.is_empty() {
+        sink.emit(ScanEvent::notice(format!(
+            "{} OS-owned item(s) kept at Source without a model call (Apple daemons/services and com.apple.*)",
+            system_owned.len()
+        )));
+    }
+    if !not_inspected.is_empty() {
+        sink.emit(ScanEvent::notice(format!(
+            "{} item(s) could not be read and are held at Source — not sent to the model",
+            not_inspected.len()
+        )));
     }
 
     // Explain the floor's cost to the headline figure during the scan, not
@@ -744,7 +931,7 @@ pub async fn run_scan(
     let mut auto_highed = 0usize;
     if !config.mode.is_deep() {
         for c in candidates.iter_mut() {
-            if c.band == Band::Middle {
+            if c.readable && c.band == Band::Middle {
                 if let Some(basis) = definitionally_driftwood_basis(
                     Path::new(&c.path),
                     &home,
@@ -772,7 +959,11 @@ pub async fn run_scan(
     let definite_recoverable: u64 = candidates
         .iter()
         .filter(|c| {
-            if never_flagged.contains(&c.id) || floored.contains_key(&c.id) {
+            if never_flagged.contains(&c.id)
+                || floored.contains_key(&c.id)
+                || system_owned.contains_key(&c.id)
+                || not_inspected.contains(&c.id)
+            {
                 return false;
             }
             if let Some((tier, _)) = pinned.get(&c.id) {
@@ -808,6 +999,8 @@ pub async fn run_scan(
                 && !pinned.contains_key(&c.id)
                 && !never_flagged.contains(&c.id)
                 && !floored.contains_key(&c.id)
+                && !system_owned.contains_key(&c.id)
+                && !not_inspected.contains(&c.id)
         })
         .cloned()
         .collect();
@@ -824,6 +1017,8 @@ pub async fn run_scan(
                     && !pinned.contains_key(&c.id)
                     && !never_flagged.contains(&c.id)
                     && !floored.contains_key(&c.id)
+                    && !system_owned.contains_key(&c.id)
+                    && !not_inspected.contains(&c.id)
             })
             .count();
         sink.emit(ScanEvent::notice(format!(
@@ -959,11 +1154,41 @@ pub async fn run_scan(
                     1.0,
                     None,
                 )
+            } else if not_inspected.contains(&c.id) {
+                // A failed read is held at Source by code, with the reason
+                // surfaced. The model never sees these items at all.
+                let reason = c
+                    .read_error
+                    .clone()
+                    .unwrap_or_else(|| "unreadable".to_string());
+                (
+                    Tier::Source,
+                    TierSource::NotInspected,
+                    format!("Could not inspect ({reason}) — kept for safety."),
+                    format!(
+                        "DriftWood could not read this item's size and contents ({reason}), so it was never \
+                         sent to the model. An unreadable item is held at Source: missing data is not evidence \
+                         that something is safe to delete. Grant Full Disk Access and rescan to have it judged."
+                    ),
+                    1.0,
+                    None,
+                )
             } else if let Some((tier, rule_id)) = pinned.get(&c.id) {
                 (
                     *tier,
                     TierSource::Rule,
                     format!("Pinned by your rule {rule_id}."),
+                    String::new(),
+                    1.0,
+                    None,
+                )
+            } else if let Some(pattern) = system_owned.get(&c.id) {
+                // OS-owned (Apple daemon/service or com.apple.*): Source by
+                // hard rule, no model call.
+                (
+                    Tier::Source,
+                    TierSource::NeverFlag,
+                    format!("System-owned location ({pattern}) — never flagged for deletion."),
                     String::new(),
                     1.0,
                     None,
@@ -1499,6 +1724,15 @@ pub async fn adjudicate_candidate(request: AdjudicationRequest, sink: Arc<dyn Ev
     let candidate = entry.candidate.clone();
     let card_tier = entry.tier;
 
+    // An unreadable item is never sent to the model, not even on request:
+    // there is no data to argue from, and a fluent answer would be fiction.
+    if !candidate.readable {
+        let reason = candidate.read_error.as_deref().unwrap_or("unreadable");
+        return Err(DriftError::Scan(format!(
+            "this item could not be inspected ({reason}) — it is held at Source and is not sent to the model"
+        )));
+    }
+
     // One batch, one item. The cost cap is disabled here (0.0): see the
     // doc comment above.
     let mut cfg = crate::config::DriftTuning::default().reasoning;
@@ -1974,9 +2208,31 @@ mod tests {
             .iter()
             .find(|e| e.candidate.path.ends_with("some.folder"))
             .expect("the folder must still be reported");
-        assert_eq!(folder_entry.candidate.size_bytes, 0, "no size is claimed");
-        let stats = folder_entry.candidate.kind_stats.as_ref().unwrap();
-        assert!(stats.truncated, "the data model must say the walk was incomplete");
+        // The old contract was "zero size + truncated". The honest contract
+        // is now tri-state: the size is an ERROR, not 0, the item is marked
+        // unreadable, and no zero is ever claimed as a measurement.
+        assert!(
+            !folder_entry.candidate.readable,
+            "an unmeasured folder must be marked unreadable"
+        );
+        assert!(
+            !folder_entry.candidate.size_state.is_known(),
+            "the size state must say the field was not read"
+        );
+        assert!(
+            folder_entry.candidate.read_error.is_some(),
+            "the read error must carry a reason"
+        );
+        assert!(
+            folder_entry.candidate.kind_stats.is_none(),
+            "no child stats may be claimed for an unmeasured folder"
+        );
+        assert_eq!(
+            folder_entry.tier,
+            Tier::Source,
+            "an unreadable item is kept at Source by code"
+        );
+        assert_eq!(folder_entry.tier_source, TierSource::NotInspected);
 
         let events = sink.snapshot();
         assert!(
@@ -2102,6 +2358,13 @@ mod tests {
             last_used_from_spotlight: false,
             modified_date: None,
             created_date: None,
+            size_state: FieldState::Known,
+            children_state: FieldState::Unavailable,
+            modified_state: FieldState::Unavailable,
+            created_state: FieldState::Unavailable,
+            last_used_state: FieldState::Unavailable,
+            readable: true,
+            read_error: None,
             orphan_status: OrphanStatus::Unknown,
             scope_category: crate::types::ScopeCategory::Low,
             score: 50.0,

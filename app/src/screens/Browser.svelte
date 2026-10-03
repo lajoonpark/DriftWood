@@ -2,7 +2,7 @@
   import { fade } from "svelte/transition";
   import Stamp from "../components/Stamp.svelte";
   import { reveal } from "../lib/motion";
-  import { formatBytes, formatCount, relDate, truncateMiddle } from "../lib/format";
+  import { formatBytes, formatCount, lastUsedLabel, sizeLabel, truncateMiddle } from "../lib/format";
   import { scan, toast } from "../lib/stores";
   import { bridge } from "../lib/bridge";
   import {
@@ -328,7 +328,7 @@
                 <span class="r-main">
                   <span class="r-name mono">{truncateMiddle(c.path, 72)}</span>
                   <span class="r-sub">
-                    {SCOPE_LABELS[c.scope_category]} · last used {relDate(c.last_used_date)} · {formatBytes(c.size_bytes)}
+                    {SCOPE_LABELS[c.scope_category]} · {lastUsedLabel(c)} · {sizeLabel(c)}
                     {#if e.tier_source === "llm_propagated"}
                       · shared cluster judgment
                     {:else if e.tier_source === "fallback" || e.tier_source === "heuristic"}

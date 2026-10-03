@@ -20,38 +20,17 @@ pub fn still_in_current(
 }
 
 /// Hardcode-banned paths (edge case §4.10): always tier 4 minimum,
-/// regardless of score. Matched as suffixes relative to the home dir or as
-/// absolute prefixes. Includes iOS device backups (MobileSync), keychains,
-/// mail, and messages — never candidates for deletion advice.
-pub const NEVER_FLAG_SUFFIXES: &[&str] = &[
-    "Library/Keychains",
-    "Library/Application Support/Knowledge",
-    "Library/Application Support/MobileSync",
-    "Library/Application Support/SyncServices",
-    "Library/Application Support/CallHistoryDB",
-    "Library/Application Support/CallHistoryTransactions",
-    "Library/Mail",
-    "Library/Mail Downloads",
-    "Library/Messages",
-    "Library/Accounts",
-    "Library/Cookies",
-    "Library/Safari",
-    "Library/Passwords",
-];
+/// regardless of score. The patterns now live in ONE editable place,
+/// [`crate::system_paths::PROTECTED_HOME_SUFFIXES`]; this alias keeps the
+/// existing name working. Includes iOS device backups (MobileSync),
+/// keychains, mail, messages, and call history — never candidates for
+/// deletion advice.
+pub use crate::system_paths::PROTECTED_HOME_SUFFIXES as NEVER_FLAG_SUFFIXES;
 
 /// Is this path on the never-flag list? `home` is the user's home dir;
 /// paths outside home are never flagged unless explicitly absolute.
 pub fn is_never_flagged(path: &Path, home: &Path) -> bool {
-    let rel = path.strip_prefix(home).ok();
-    if let Some(rel) = rel {
-        let rel_str = rel.to_string_lossy();
-        for suffix in NEVER_FLAG_SUFFIXES {
-            if rel_str == *suffix || rel_str.starts_with(&format!("{suffix}/")) {
-                return true;
-            }
-        }
-    }
-    false
+    crate::system_paths::is_protected_home_path(path, home)
 }
 
 /// Group-container paths (`~/Library/Containers/group.*`,

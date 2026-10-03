@@ -23,17 +23,48 @@ pub struct FolderMeasure {
     pub stats: KindStats,
     /// Bytes of regular files seen (under-counts truncated walks).
     pub bytes: u64,
+    /// Set when the folder itself could not be opened (permission denied,
+    /// I/O error). When `Some`, `stats` and `bytes` are NOT a real
+    /// measurement — the caller must report the field as errored, never 0.
+    pub error: Option<String>,
+    /// Entries skipped mid-walk because their metadata could not be read.
+    /// Nonzero means the measurement is partial: it is a floor, not a size.
+    pub skipped: u64,
+}
+
+/// Human-readable reason for a failed filesystem read. TCC-protected
+/// directories surface as `PermissionDenied`; the text is what the report
+/// shows instead of a fake size.
+pub fn io_reason(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission denied".to_string(),
+        std::io::ErrorKind::NotFound => "not found".to_string(),
+        _ => e.to_string(),
+    }
 }
 
 /// Walk a folder with caps, accumulating child/file counts, bytes and a
 /// cache-like extension ratio. Truncated walks are flagged in the stats.
 /// Permission errors are skip-and-count, never abort (edge case §4.3).
+///
+/// A FAILED read is never reported as an empty folder: if the root cannot
+/// be opened the measure carries `error` and no stats; if individual
+/// entries fail mid-walk the count is marked `skipped` (partial).
 pub fn measure_folder(
     root: &Path,
     caps: &WalkCaps,
     mut on_progress: impl FnMut(u64, u64),
 ) -> FolderMeasure {
     let mut measure = FolderMeasure::default();
+
+    // Probe the root explicitly before walking. A TCC-protected directory
+    // fails `read_dir` with EPERM; walkdir would otherwise surface that as
+    // one skipped entry and leave `children == 0`, which reads as "empty".
+    if let Err(e) = std::fs::read_dir(root) {
+        measure.error = Some(io_reason(&e));
+        return measure;
+    }
+
     let stats = &mut measure.stats;
     let mut ext_hits: u64 = 0;
     let mut ext_sampled: u64 = 0;
@@ -52,7 +83,9 @@ pub fn measure_folder(
         let entry = match entry {
             Ok(e) => e,
             Err(_) => {
-                // Permission error / vanished file: wading past, not aborting.
+                // Permission error / vanished file: wading past, not aborting
+                // — but it makes the measurement partial, not empty.
+                measure.skipped += 1;
                 continue;
             }
         };
@@ -66,8 +99,9 @@ pub fn measure_folder(
             continue;
         }
         stats.files += 1;
-        if let Ok(meta) = entry.metadata() {
-            measure.bytes = measure.bytes.saturating_add(meta.len());
+        match entry.metadata() {
+            Ok(meta) => measure.bytes = measure.bytes.saturating_add(meta.len()),
+            Err(_) => measure.skipped += 1,
         }
         if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
             ext_sampled += 1;

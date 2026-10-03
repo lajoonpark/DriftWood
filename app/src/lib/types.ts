@@ -14,13 +14,20 @@ export type TierSource =
   | "heuristic"
   | "never_flag"
   | "system_floor"
-  | "adjudication";
+  | "adjudication"
+  | "not_inspected";
 
 export type Kind = "file" | "folder" | "app";
 export type OrphanStatus = "orphaned" | "active" | "unknown";
 export type ScopeCategory = "low" | "medium" | "high";
 export type PrivacyTier = "minimal" | "standard" | "deep";
 export type Band = "high" | "middle" | "low";
+
+/** Tri-state read state for a collected field (size, child count, a date).
+ *  `"known"` carries a real value; `"unavailable"` means no data source
+ *  existed; `{ error }` means the read failed (e.g. permission denied).
+ *  Never render a non-known field as 0 / empty. */
+export type FieldState = "known" | "unavailable" | { error: string };
 
 /** Core scan phases, mapped to themed labels in the UI. */
 export type Phase =
@@ -99,6 +106,18 @@ export interface Candidate {
   last_used_from_spotlight: boolean;
   modified_date?: string;
   created_date?: string;
+  /** Tri-state read state for each collected field. Missing on reports
+   *  persisted before this field existed → treat as "known". */
+  size_state?: FieldState;
+  children_state?: FieldState;
+  modified_state?: FieldState;
+  created_state?: FieldState;
+  last_used_state?: FieldState;
+  /** False when sizing or listing failed, or was partial. Such items are
+   *  held at Source by the backend and never sent to the model. */
+  readable?: boolean;
+  /** Human-readable reason when readable is false (e.g. "permission denied"). */
+  read_error?: string;
   orphan_status: OrphanStatus;
   scope_category: ScopeCategory;
   score: number;

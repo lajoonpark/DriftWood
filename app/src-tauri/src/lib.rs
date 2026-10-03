@@ -1269,6 +1269,7 @@ mod tests {
             "never_flag",
             "system_floor",
             "adjudication",
+            "not_inspected",
         ];
         let entries: Vec<serde_json::Value> = sources
             .iter()

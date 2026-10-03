@@ -785,7 +785,7 @@ pub fn format_cost(usd: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Band, Kind, OrphanStatus, ScopeCategory, ScoreComponents};
+    use crate::types::{Band, FieldState, Kind, OrphanStatus, ScopeCategory, ScoreComponents};
 
     /// Distinct parent per dir so batching tests get one cluster per item;
     /// plain `candidate` shares `/tmp` so dedup tests get one cluster.
@@ -800,6 +800,13 @@ mod tests {
             last_used_from_spotlight: false,
             modified_date: None,
             created_date: None,
+            size_state: FieldState::Known,
+            children_state: FieldState::Unavailable,
+            modified_state: FieldState::Unavailable,
+            created_state: FieldState::Unavailable,
+            last_used_state: FieldState::Unavailable,
+            readable: true,
+            read_error: None,
             orphan_status: OrphanStatus::Unknown,
             scope_category: ScopeCategory::Low,
             score,

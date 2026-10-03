@@ -18,8 +18,10 @@ Tiers:
 
 Context you can rely on:
 - Anything used within the last 3 weeks was already filtered out ("still in the current").
-- "orphan_status: orphaned" means the owning application is no longer installed.
-- Sizes are bytes. age_days is days since last use (or modification when last-use is unknown).
+- "orphan_status: orphaned" means there is POSITIVE evidence the owning app was once present and is now gone (a leftover bundle identifier with no matching install). "unknown" means no evidence either way — it is not a hint that the item is disposable, and "no matching app found" alone is never proof of orphanhood.
+- "size" is bytes when it was measured. Any field rendered as "unavailable" or "unavailable (<reason>)" was NOT INSPECTED: never treat it as empty or zero, and never use missing data as evidence that an item is safe to delete.
+- Dates are labeled by the field they came from. "last_used" appears only when macOS actually recorded a use (Spotlight). "last_modified" and "created" are filesystem timestamps and are NOT usage — a directory's modified date changes only when entries are added or removed.
+- "age_days_since_last_use" appears only when last-use is genuinely known. If it is absent, you do not know the age; do not infer activity from a modification date.
 
 Output: respond with ONLY a JSON array, one object per candidate, in the same order:
 [{"id": "<candidate id>", "tier": <1|2|3|4>, "confidence": <0..1>, "summary": "<one sentence: what it is / why it exists>", "reasoning": "<full rationale>"}]

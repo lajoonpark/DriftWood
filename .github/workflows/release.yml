@@ -1,0 +1,190 @@
+name: Release
+
+# Cut a DriftWood release.
+#
+# - Push a v* tag (e.g. v1.4.2) to build the macOS arm64 DMG and open a DRAFT
+#   GitHub release with the DMG, its SHA-256, and the curated release notes.
+# - Or run this workflow manually to rebuild / re-attach assets for an existing
+#   tag. The "Release tag" input lets you target a specific tag.
+#
+# The release notes come from release-notes/<tag>.md when present. The "release"
+# Kilo agent is responsible for writing that file and CHANGELOG.md before the
+# tag is pushed. If the file is missing, the workflow warns and falls back to
+# GitHub's auto-generated notes.
+#
+# Signing is ad-hoc and not notarized (bundle.macOS.signingIdentity = "-"), so no
+# Apple secrets are required.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)release, e.g. v1.4.2. Leave empty to use the branch/ref name."
+        required: false
+        type: string
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build macOS (arm64) DMG and open draft release
+    runs-on: macos-14
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Resolve release tag
+        id: resolve
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *)
+              echo "::error::Release tag '$TAG' is invalid. Tags must look like v1.2.3."
+              exit 1
+              ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG (version ${TAG#v})"
+
+      - name: Check out release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify app version files match the tag
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAURI_VER="$(jq -r '.version' app/src-tauri/tauri.conf.json)"
+          PKG_VER="$(jq -r '.version' app/package.json)"
+          CARGO_VER="$(grep -m1 -E '^version[[:space:]]*=' app/src-tauri/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+
+          echo "tag version:            $VERSION"
+          echo "tauri.conf.json:        $TAURI_VER"
+          echo "app/package.json:       $PKG_VER"
+          echo "src-tauri/Cargo.toml:   $CARGO_VER"
+
+          mismatch=0
+          for pair in "app/src-tauri/tauri.conf.json:$TAURI_VER" "app/package.json:$PKG_VER" "app/src-tauri/Cargo.toml:$CARGO_VER"; do
+            file="${pair%%:*}"
+            got="${pair#*:}"
+            if [ "$got" != "$VERSION" ]; then
+              echo "::error file=$file::Version '$got' does not match release tag '$VERSION'."
+              mismatch=1
+            fi
+          done
+          if [ "$mismatch" -ne 0 ]; then
+            echo "Bump the app version files to $VERSION before tagging. The tag is the source of truth."
+            exit 1
+          fi
+
+          # The library crates track their own version (workspace.package.version).
+          # Its drift is expected between app releases, so it is only a notice.
+          WS_VER="$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "$WS_VER" != "$VERSION" ]; then
+            echo "::warning::Workspace/crate version is $WS_VER while the app release is $VERSION. The crates are versioned separately; leave them unless you intend to match."
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build the app (DMG)
+        id: build
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --target aarch64-apple-darwin
+
+          DMG_DIR="../target/aarch64-apple-darwin/release/bundle/dmg"
+          DMG="$(find "$DMG_DIR" -maxdepth 1 -name '*.dmg' -print -quit)"
+          if [ -z "$DMG" ]; then
+            echo "::error::No DMG produced under $DMG_DIR"
+            find ../target -name '*.dmg' -print || true
+            exit 1
+          fi
+
+          # Make the path absolute so later steps (which run from the repo root)
+          # can find the asset.
+          DMG="$(cd "$(dirname "$DMG")" && pwd)/$(basename "$DMG")"
+          SHA="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+          printf '%s  %s\n' "$SHA" "$(basename "$DMG")" > "$DMG.sha256"
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Built $(basename "$DMG") ($SHA)"
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          DMG: ${{ steps.build.outputs.dmg }}
+        run: |
+          set -euo pipefail
+          NOTES="release-notes/${TAG}.md"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; re-uploading assets."
+            gh release upload "$TAG" "$DMG" "$DMG.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+            if [ -f "$NOTES" ]; then
+              gh release edit "$TAG" --notes-file "$NOTES" --repo "$GITHUB_REPOSITORY"
+            fi
+          elif [ -f "$NOTES" ]; then
+            echo "Creating draft release $TAG with curated notes from $NOTES."
+            gh release create "$TAG" "$DMG" "$DMG.sha256" \
+              --draft \
+              --title "DriftWood ${TAG}" \
+              --notes-file "$NOTES" \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            echo "::warning file=$NOTES::No curated release notes found. Creating draft $TAG with auto-generated notes."
+            gh release create "$TAG" "$DMG" "$DMG.sha256" \
+              --draft \
+              --title "DriftWood ${TAG}" \
+              --generate-notes \
+              --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          SHA: ${{ steps.build.outputs.sha256 }}
+        run: |
+          echo "### DriftWood ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- DMG SHA-256: \`${SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Release: $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url -q .url)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- The release is a **draft**. Review the notes and assets, then publish it." >> "$GITHUB_STEP_SUMMARY"

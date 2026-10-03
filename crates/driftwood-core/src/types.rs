@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::score::ScoreComponents;
 
+/// Serde default for `Candidate.readable`: reports persisted before the
+/// field existed represent fully-read items.
+pub fn default_true() -> bool {
+    true
+}
+
 /// Risk tier 1..4 (river names in [`Tier::name`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(into = "u8", try_from = "u8")]
@@ -100,6 +106,50 @@ pub enum TierSource {
     /// alongside the card, never applied to it — only an explicit user
     /// re-stamp changes a tier.
     Adjudication,
+    /// The metadata layer could not inspect this item (sizing or listing
+    /// failed, or was partial). It was never sent to the model and is held
+    /// at Source by code: a failed read must never be mistaken for an empty
+    /// or safe-to-delete item.
+    NotInspected,
+}
+
+/// Read state of one collected field (size, child count, a date).
+///
+/// A failed read is never flattened into a default. `Known` carries a real
+/// value; `Unavailable` means no data source existed (e.g. Spotlight never
+/// recorded a last-use date — not a failure); `Error` means the read was
+/// attempted and failed, with a human-readable reason ("permission denied").
+///
+/// Wire shape: `"known"`, `"unavailable"`, or `{"error": "<reason>"}`.
+/// Reports persisted before this field existed default to `Known`, matching
+/// the only behavior those scans had.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldState {
+    Known,
+    Unavailable,
+    Error(String),
+}
+
+impl Default for FieldState {
+    fn default() -> Self {
+        FieldState::Known
+    }
+}
+
+impl FieldState {
+    pub fn is_known(&self) -> bool {
+        matches!(self, FieldState::Known)
+    }
+
+    /// Prompt-safe text for a field whose value is not available.
+    pub fn describe(&self) -> String {
+        match self {
+            FieldState::Known => String::new(),
+            FieldState::Unavailable => "unavailable".to_string(),
+            FieldState::Error(reason) => format!("unavailable ({reason})"),
+        }
+    }
 }
 
 /// Why the auto-high rule promoted a candidate. Recorded at promotion time
@@ -199,6 +249,29 @@ pub struct Candidate {
     /// (download date is meaningful there), never as "last used".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_date: Option<DateTime<Utc>>,
+    /// Tri-state read state for each collected field. `size_bytes` below is
+    /// only a real value when `size_state == Known`; the same rule holds for
+    /// the dates and the folder child count. A non-Known state must never be
+    /// rendered or reasoned about as a zero/empty value.
+    #[serde(default)]
+    pub size_state: FieldState,
+    #[serde(default)]
+    pub children_state: FieldState,
+    #[serde(default)]
+    pub modified_state: FieldState,
+    #[serde(default)]
+    pub created_state: FieldState,
+    #[serde(default)]
+    pub last_used_state: FieldState,
+    /// False when sizing or listing failed, or was partial (some entries
+    /// could not be read). Unreadable items are gated to Source by code and
+    /// never sent to the model.
+    #[serde(default = "default_true")]
+    pub readable: bool,
+    /// Human-readable reason when `readable == false` (e.g. "permission
+    /// denied"). Never a substitute for the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_error: Option<String>,
     pub orphan_status: OrphanStatus,
     pub scope_category: ScopeCategory,
     pub score: f64,

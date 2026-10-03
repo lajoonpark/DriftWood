@@ -14,6 +14,7 @@ pub mod report;
 pub mod rules;
 pub mod scan;
 pub mod score;
+pub mod system_paths;
 pub mod types;
 
 pub use config::{default_model, DriftTuning, ScanConfig, ScanMode};
@@ -25,7 +26,8 @@ pub use events::{EventSink, Phase, ScanEvent};
 pub use report::{GroupSummary, Report, ReportEntry, SCHEMA_VERSION};
 pub use rules::Rule;
 pub use types::{
-    AutoHighBasis, Band, Candidate, Kind, OrphanStatus, PrivacyTier, ScopeCategory, Tier,
+    AutoHighBasis, Band, Candidate, FieldState, Kind, OrphanStatus, PrivacyTier, ScopeCategory,
+    Tier,
 };
 pub use types::TierSource;
 

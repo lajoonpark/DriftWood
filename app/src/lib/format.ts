@@ -1,3 +1,5 @@
+import type { Candidate } from "./types";
+
 export function formatBytes(bytes: number, precision?: number): string {
   if (bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -37,6 +39,52 @@ export function relDate(iso?: string): string {
   if (months < 18) return `${months} month${months === 1 ? "" : "s"} ago`;
   const years = +(days / 365).toFixed(1);
   return `${years} years ago`;
+}
+
+/** Why a tri-state field has no value, or null when it is known. */
+export function fieldUnavailable(
+  state?: Candidate["size_state"],
+): string | null {
+  if (!state || state === "known") return null;
+  if (typeof state === "object" && "error" in state) return state.error;
+  return "unavailable";
+}
+
+/** Size for display. An unreadable item shows the reason — never "0 B". */
+export function sizeLabel(
+  c: Pick<Candidate, "size_bytes" | "readable" | "size_state" | "read_error">,
+): string {
+  const state = c.size_state;
+  const unreadable =
+    c.readable === false || (state !== undefined && state !== "known");
+  if (!unreadable) return formatBytes(c.size_bytes);
+  const reason = c.read_error ?? fieldUnavailable(state) ?? "unreadable";
+  return `not inspected (${reason})`;
+}
+
+/** Last-used is shown only when macOS Spotlight actually recorded a use.
+ *  A filesystem mtime is NOT last-used, so when it is missing we say
+ *  "unknown" rather than inferring activity from it. */
+export function lastUsedLabel(
+  c: Pick<Candidate, "last_used_date" | "last_used_from_spotlight">,
+): string {
+  if (c.last_used_from_spotlight && c.last_used_date) {
+    return `last used ${relDate(c.last_used_date)}`;
+  }
+  return "last used unknown";
+}
+
+/** A filesystem date is labeled with the field it came from. */
+export function modifiedLabel(
+  c: Pick<Candidate, "modified_date">,
+): string | null {
+  return c.modified_date ? `modified ${relDate(c.modified_date)}` : null;
+}
+
+export function createdLabel(
+  c: Pick<Candidate, "created_date">,
+): string | null {
+  return c.created_date ? `created ${relDate(c.created_date)}` : null;
 }
 
 export function confidenceWord(c: number): string {

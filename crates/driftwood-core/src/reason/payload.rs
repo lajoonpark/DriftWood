@@ -11,7 +11,17 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::types::{Candidate, Kind, PrivacyTier};
+use crate::types::{Candidate, FieldState, Kind, PrivacyTier};
+
+/// Render one tri-state field for the model: the real value when known, or
+/// the state's honest text. An unavailable/error field is NEVER rendered as
+/// a zero/0 B — the model must see that it was not inspected.
+fn field_or_text<T: serde::Serialize>(state: &FieldState, value: impl FnOnce() -> T) -> Value {
+    match state {
+        FieldState::Known => json!(value()),
+        _ => json!(state.describe()),
+    }
+}
 
 /// Build the JSON payload for one candidate under the given privacy tier.
 pub fn build_payload(
@@ -25,28 +35,47 @@ pub fn build_payload(
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_lowercase()));
 
-    // Age bucket instead of raw date: fewer tokens, same judgment signal.
-    let age_days = candidate
-        .last_used_date
-        .or(candidate.modified_date)
-        .map(|d| (chrono::Utc::now() - d).num_days());
-
     let mut payload = json!({
         "id": candidate.id,
         "kind": candidate.kind,
-        "size_bytes": candidate.size_bytes,
-        "age_days": age_days,
-        "last_used_known": candidate.last_used_from_spotlight,
+        // Tri-state: a number when measured, otherwise the honest text
+        // "unavailable" / "unavailable (permission denied)".
+        "size": field_or_text(&candidate.size_state, || candidate.size_bytes),
+        "readable": candidate.readable,
+        // Each date is labeled with the field it came from. "last_used" is
+        // only ever present when Spotlight actually recorded a use;
+        // "last_modified"/"created" are filesystem timestamps, NOT usage.
+        "last_used": field_or_text(&candidate.last_used_state, || candidate.last_used_date),
+        "last_used_source": if candidate.last_used_from_spotlight { "spotlight" } else { "unknown" },
+        "last_modified": field_or_text(&candidate.modified_state, || candidate.modified_date),
+        "created": field_or_text(&candidate.created_state, || candidate.created_date),
         "orphan_status": candidate.orphan_status,
         "ext": ext,
         "drift_score": (candidate.score * 10.0).round() / 10.0,
         "band": candidate.band,
     });
 
-    if candidate.kind != Kind::File {
-        if let Some(stats) = &candidate.kind_stats {
-            payload["children"] = json!(stats.children);
+    // An age that reads as "usage" is only emitted when usage is actually
+    // known (Spotlight). A directory's mtime is not last-used, so it is
+    // never turned into an age figure the model could read as activity.
+    if candidate.last_used_from_spotlight {
+        if let Some(d) = candidate.last_used_date {
+            payload["age_days_since_last_use"] =
+                json!((chrono::Utc::now() - d).num_days().max(0));
         }
+    }
+    if let Some(reason) = &candidate.read_error {
+        payload["read_error"] = json!(reason);
+    }
+
+    if candidate.kind != Kind::File {
+        payload["children"] = field_or_text(&candidate.children_state, || {
+            candidate
+                .kind_stats
+                .as_ref()
+                .map(|s| s.children)
+                .unwrap_or(0)
+        });
     }
 
     if privacy != PrivacyTier::Minimal {
@@ -113,7 +142,7 @@ pub fn folder_listing(path: &Path, cap: usize) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Band, OrphanStatus, ScopeCategory, ScoreComponents};
+    use crate::types::{Band, FieldState, OrphanStatus, ScopeCategory, ScoreComponents};
     use chrono::{TimeZone, Utc};
 
     fn candidate(path: &str, score: f64) -> Candidate {
@@ -132,6 +161,13 @@ mod tests {
             last_used_from_spotlight: true,
             modified_date: None,
             created_date: None,
+            size_state: FieldState::Known,
+            children_state: FieldState::Known,
+            modified_state: FieldState::Unavailable,
+            created_state: FieldState::Unavailable,
+            last_used_state: FieldState::Known,
+            readable: true,
+            read_error: None,
             orphan_status: OrphanStatus::Orphaned,
             scope_category: ScopeCategory::Low,
             score,

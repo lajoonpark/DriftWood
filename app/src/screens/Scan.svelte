@@ -1,9 +1,10 @@
 <script lang="ts">
   import { fade, fly } from "svelte/transition";
+  import { onMount } from "svelte";
   import RiverArt from "../components/RiverArt.svelte";
   import StatusLine from "../components/StatusLine.svelte";
   import Counter from "../components/Counter.svelte";
-  import { bridge } from "../lib/bridge";
+  import { bridge, type FdaStatus } from "../lib/bridge";
   import { formatBytes, formatCount } from "../lib/format";
   import { onboarding, scan, toast, SCOPE_FOLDERS, appSettings, saveSettings } from "../lib/stores";
   import {
@@ -21,6 +22,18 @@
   /** Acknowledge "Pull ashore" immediately — the button must never look
    *  dead while a batch finishes; the report then arrives as partial. */
   let stoppingAck = $state(false);
+
+  /** Full Disk Access probe, shown before the scan. Without it, protected
+   *  folders can't be inspected; the report will mark them "not inspected"
+   *  rather than showing a misleading size. */
+  let fda = $state<FdaStatus | null>(null);
+  onMount(async () => {
+    try {
+      fda = await bridge.checkFullDiskAccess();
+    } catch {
+      fda = "unknown";
+    }
+  });
 
   const s = $derived($onboarding);
 
@@ -218,6 +231,20 @@
         <p class="scope-line" in:fade={{ duration: 600, delay: 560 }}>
           {scopeSummary} · cap ${$appSettings.costCap.toFixed(2)}
         </p>
+        {#if fda === "denied"}
+          <div class="fda-notice" in:fade={{ duration: 600, delay: 620 }}>
+            <p class="fda-kicker">Full Disk Access not granted</p>
+            <p class="fda-body">
+              Protected folders — Mail, Messages, Safari, and some Application
+              Support services — can't be inspected. DriftWood will show them as
+              <em>not inspected</em> and keep them at Source rather than guess a
+              size. Grant access and rescan to have them judged.
+            </p>
+            <button class="btn-quiet" onclick={() => bridge.openSystemSettings()}>
+              Open System Settings
+            </button>
+          </div>
+        {/if}
         <div class="mode" in:fade={{ duration: 600, delay: 660 }}>
           <div class="mode-row" role="radiogroup" aria-label="Scan mode">
             {#each MODES as m (m)}
@@ -285,6 +312,39 @@
     font-size: 13px;
     color: var(--ink-faint);
     letter-spacing: 0.06em;
+  }
+
+  .fda-notice {
+    margin-top: 18px;
+    max-width: 460px;
+    padding: 14px 18px;
+    border-radius: 10px;
+    text-align: left;
+    background: rgba(255, 255, 255, 0.4);
+    box-shadow: inset 0 0 0 1px var(--hairline);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .fda-kicker {
+    font-size: 11.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--warn);
+    font-weight: 650;
+  }
+
+  .fda-body {
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+
+  .fda-body em {
+    font-style: italic;
+    color: var(--ink);
   }
 
   .mode {
