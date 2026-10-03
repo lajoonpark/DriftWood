@@ -14,32 +14,52 @@ removes files there. That guarantee is unchanged in every release below.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-03
+
 ### Added
 
 - Release workflow (`.github/workflows/release.yml`): pushing a `v*` tag builds
   the arm64 macOS DMG, verifies the app version files against the tag, and opens
   a **draft** GitHub release with the DMG, its SHA-256, and curated notes.
-- Full Disk Access probe at scan start. The scan can now say which
-  TCC-protected folders it could not list, instead of reporting them as empty.
+- Full Disk Access probe at scan start. When macOS denies the listing of a
+  TCC-protected folder (`~/Library/Safari`, `Mail`, `Messages`), the scan warns,
+  the report carries a `full_disk_access` warning, and the Scan screen shows a
+  notice with a button to open System Settings.
 - One editable system-owned path list (`crates/driftwood-core/src/system_paths.rs`):
-  protected home locations (keychains, mail, messages, MobileSync device
-  backups, call history), Apple daemon/service directory names, and `com.apple.*`
-  owner patterns. A match goes straight to Source before any model call and
-  costs no tokens.
+  protected home locations, Apple daemon/service directory names (`Call*`,
+  `Mobile*`, …), and the `com.apple.*` owner pattern. A match goes straight to
+  Source before any model call and costs no tokens. Extends the previous lists
+  (MobileDevice, CallHistoryDB, CallHistoryTransactions, `com.apple.sharedfilelist`,
+  IdentityServices, HomeKit, Sharing, Suggestions).
+- Unreadable items are shown as "not inspected" with the reason and held at
+  Source (`tier_source: not_inspected`); they are never sent to the model, and
+  "Ask the river" is disabled on them.
 
 ### Changed
 
 - Metadata reads are tri-state: `known`, `unavailable`, or `error` with a
-  reason. A failed size, child count, or date read is never rendered or reasoned
-  about as a zero/empty value.
-- Unreadable items are held at Source in code and never sent to the model.
-- Folder sizing distinguishes a failed read, a partial read, and a timeout. A
-  failed read is never reported as 0 B.
-- Orphan detection now requires positive evidence: only a reverse-DNS folder
-  name with no matching installed app counts as orphaned. A plain folder name
-  with no match is `unknown`, and OS-owned folders are never orphaned.
-- `last used` is only emitted when Spotlight actually recorded a use; filesystem
-  timestamps are labeled as timestamps, not as usage.
+  reason. Size, child count, and dates are sent to the model that way, and a
+  failed read is never rendered or reasoned about as a zero/empty value.
+- Dates are labeled by source: `last_used` only when Spotlight recorded a use,
+  `last_modified` and `created` as the filesystem fields they are.
+  `age_days_since_last_use` is emitted only when last use is known; the old
+  `age_days` fallback to modification time is removed.
+- Tier precedence: the OS-owned Source rule now runs after your rules and
+  before the system/vendor floor.
+
+### Fixed
+
+- A folder whose size failed, timed out, or was never measured was reported as
+  0 B. A failed root read is now an error and a partial walk is marked
+  `readable: false`; a zero is never claimed as a measurement.
+- A plain folder name with no installed-app match was classified `orphaned`.
+  Only a reverse-DNS name is evidence of a former install now; a plain name
+  with no match is `unknown`, and OS-owned names are never orphaned.
+- A timed-out installed-app snapshot left orphan detection running blind and
+  could mark folders orphaned. Without the snapshot, orphan status is `unknown`.
+- A directory's modification date was folded into the model's age figure as
+  "last use (or modification when last-use is unknown)". Missing usage is now
+  labeled as missing.
 
 ## [1.4.1] - 2026-10-03
 
@@ -220,7 +240,8 @@ removes files there. That guarantee is unchanged in every release below.
 - The Rust workspace: the `driftwood-core` scan/score/reason/report engine, plus
   the `driftwood-cli` and `driftwood-mcp` wrappers, and the app UI.
 
-[Unreleased]: https://github.com/lajoonpark/DriftWood/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/lajoonpark/DriftWood/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/lajoonpark/DriftWood/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/lajoonpark/DriftWood/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/lajoonpark/DriftWood/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/lajoonpark/DriftWood/compare/v1.2.0...v1.3.0
