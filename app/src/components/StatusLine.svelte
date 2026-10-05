@@ -91,7 +91,7 @@
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--ink-faint);
-    opacity: calc(0.5 + var(--i) * 0.1);
+    opacity: calc(0.62 + var(--i) * 0.1);
     animation: settle 0.6s var(--ease-out);
   }
 
@@ -169,7 +169,7 @@
     padding: 12px 16px;
     border: 1px solid var(--hairline-soft);
     border-radius: 12px;
-    background: rgba(255, 255, 255, 0.35);
+    background: rgba(247, 242, 230, 0.92);
     display: flex;
     flex-direction: column;
     gap: 3px;

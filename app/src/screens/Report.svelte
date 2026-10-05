@@ -298,7 +298,7 @@
   /* The fine print under the headline: says what the big number counts
      so the actionable figure and the all-findings figure cannot blur. */
   .sub-note {
-    font-size: 12px;
+    font-size: 12.5px;
     color: var(--ink-faint);
   }
 
@@ -319,7 +319,7 @@
   }
 
   .adj-spend {
-    font-size: 11px;
+    font-size: 11.5px;
     color: var(--ink-faint);
   }
 
@@ -407,7 +407,7 @@
   }
 
   .g-meta {
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--ink-faint);
   }
 

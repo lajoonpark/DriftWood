@@ -226,7 +226,7 @@
   {:else}
     <div class="idle">
       <div class="hero-copy">
-        <p class="kicker rv" in:fade={{ duration: 600, delay: 150 }}>Ready when you are</p>
+        <p class="kicker" in:fade={{ duration: 600, delay: 150 }}>Ready when you are</p>
         <h1 in:fly={{ y: 22, duration: 700, delay: 280 }}>Search the river?</h1>
         <p class="scope-line" in:fade={{ duration: 600, delay: 560 }}>
           {scopeSummary} · cap ${$appSettings.costCap.toFixed(2)}
@@ -245,7 +245,7 @@
             </button>
           </div>
         {/if}
-        <div class="mode" in:fade={{ duration: 600, delay: 660 }}>
+        <div class="mode slip" in:fade={{ duration: 600, delay: 660 }}>
           <div class="mode-row" role="radiogroup" aria-label="Scan mode">
             {#each MODES as m (m)}
               <button
@@ -269,7 +269,7 @@
         <div class="actions" in:fly={{ y: 14, duration: 600, delay: 780 }}>
           <button class="btn btn-primary cta" onclick={start}>Search the river</button>
           {#if st.report}
-            <button class="btn-quiet" onclick={onDone}>Read the last report →</button>
+            <button class="btn btn-ghost btn-sm" onclick={onDone}>Read the last report →</button>
           {/if}
         </div>
       </div>
@@ -295,12 +295,39 @@
     text-align: center;
   }
 
+  /* The fog bank — morning mist rising off the river so the controls read
+     at a glance. Layered soft-edge gradients of the paper tone; no
+     backdrop-filter, which stalls the webview compositor over the
+     displaced river layers. The crest of the mound stays visible above
+     the fog, between the headline and the mode slip. */
+  .idle::before {
+    content: "";
+    position: absolute;
+    inset: 24% 0 0 0;
+    background:
+      radial-gradient(
+        74% 58% at 50% 57%,
+        rgba(var(--fog), 0.9) 0%,
+        rgba(var(--fog), 0.68) 46%,
+        rgba(var(--fog), 0) 100%
+      ),
+      linear-gradient(
+        to bottom,
+        rgba(var(--fog), 0) 0%,
+        rgba(var(--fog), 0.5) 42%,
+        rgba(var(--fog), 0.9) 100%
+      );
+    pointer-events: none;
+  }
+
   .hero-copy {
-    margin-top: 20vh;
+    position: relative;
+    z-index: 1;
+    margin-top: 15vh;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
   }
 
   h1 {
@@ -309,18 +336,18 @@
   }
 
   .scope-line {
-    font-size: 13px;
-    color: var(--ink-faint);
-    letter-spacing: 0.06em;
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.04em;
   }
 
   .fda-notice {
-    margin-top: 18px;
+    margin-top: 14px;
     max-width: 460px;
     padding: 14px 18px;
     border-radius: 10px;
     text-align: left;
-    background: rgba(255, 255, 255, 0.4);
+    background: rgba(247, 242, 230, 0.92);
     box-shadow: inset 0 0 0 1px var(--hairline);
     display: flex;
     flex-direction: column;
@@ -348,11 +375,13 @@
   }
 
   .mode {
-    margin-top: 16px;
+    margin-top: 18px;
+    padding: 16px 24px 14px;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 10px;
+    max-width: 580px;
   }
 
   .mode-row {
@@ -361,26 +390,35 @@
   }
 
   .mode-btn {
-    padding: 8px 18px;
+    padding: 8px 20px;
     border-radius: 999px;
-    font-size: 13px;
+    font-size: 13.5px;
+    font-weight: 600;
     color: var(--ink-soft);
-    background: rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.52);
     box-shadow: inset 0 0 0 1px var(--hairline);
     transition:
       color 0.25s,
-      box-shadow 0.25s;
+      box-shadow 0.25s,
+      background-color 0.25s;
+  }
+
+  .mode-btn:hover {
+    color: var(--ink);
   }
 
   .mode-btn.active {
     color: var(--ink);
-    box-shadow: inset 0 0 0 1.5px var(--river-mid);
+    background: rgba(255, 255, 255, 0.82);
+    box-shadow:
+      inset 0 0 0 1.5px var(--river-mid),
+      0 1px 4px rgba(41, 50, 60, 0.14);
   }
 
   .mode-hint {
-    max-width: 480px;
-    font-size: 12.5px;
-    color: var(--ink-faint);
+    max-width: 520px;
+    font-size: 13px;
+    color: var(--ink-soft);
     line-height: 1.5;
   }
 
@@ -402,8 +440,8 @@
   }
 
   .cta {
-    padding: 15px 38px;
-    font-size: 15.5px;
+    padding: 16px 42px;
+    font-size: 16px;
   }
 
   /* ---------- running ---------- */
@@ -424,12 +462,12 @@
     left: 0;
     right: 0;
     bottom: 0;
-    height: 36vh;
+    height: 46vh;
     background: linear-gradient(
       to bottom,
-      rgba(243, 237, 222, 0) 0%,
-      rgba(243, 237, 222, 0.5) 42%,
-      rgba(243, 237, 222, 0.88) 100%
+      rgba(var(--fog), 0) 0%,
+      rgba(var(--fog), 0.66) 40%,
+      rgba(var(--fog), 0.95) 100%
     );
     pointer-events: none;
   }
