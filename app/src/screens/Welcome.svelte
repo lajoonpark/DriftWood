@@ -74,7 +74,7 @@
   .promise {
     margin-top: 64px;
     font-size: 13px;
-    color: var(--ink-faint);
+    color: var(--ink-soft);
     max-width: 340px;
   }
 </style>
